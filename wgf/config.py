@@ -1,0 +1,261 @@
+"""Configuration loading and seed planning for S1 simulations."""
+from __future__ import annotations
+
+import json
+import warnings
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional
+
+import numpy as np
+
+Activation = Literal["relu", "gelu"]
+
+
+@dataclass(frozen=True)
+class RunConfig:
+    betas: List[float]
+    n_particles: int
+    dt: float
+    total_time: float
+    save_every: int
+    k_max: int
+    num_mlp_inits: int
+    num_point_inits: int
+    mlp_units: int
+    activation: Activation
+    mlp_scale: float
+    mlp_scale_mode: str
+    tie_potential: bool
+    particle_seed: int
+    mlp_seed: int
+    results_dir: Path
+    dimension: int
+    plot_interval: float
+    cluster_scale: float
+    mass_threshold: float
+    convergence_window: int
+    attention_mode: str
+    unnormalized_scale_mode: str
+    integrator: str
+    max_steps: int
+    exclude_self: bool
+    convergence_drift_tol: float
+    convergence_spread_factor: float
+    output_frame_limit: int
+    experiment_dir: Optional[Path]
+
+
+@dataclass(frozen=True)
+class SeedPlan:
+    particle_seeds: List[int]
+    mlp_seeds: List[int]
+
+
+DEFAULT_CONFIG: Dict[str, Any] = {
+    "betas": [0.1, 0.5, 1, 2, 5, 7, 9, 12, 15, 25],
+    "n_particles": 1000,
+    "dt": 5e-4,
+    "total_time": 20.0,
+    "save_every": 10,
+    "k_max": 20,
+    "num_mlp_inits": 1,
+    "num_point_inits": 1,
+    "mlp_units": None,
+    "activation": "relu",
+    "mlp_scale": 0.5,
+    "mlp_scale_mode": "fixed",
+    "dimension": 2,
+    "attention_mode": "unnormalized",
+    "unnormalized_scale_mode": "standard",
+    "integrator": "euler",
+    "particle_seed": 7,
+    "mlp_seed": 11,
+    "results_dir": "results",
+    "plot_interval": 0.1,
+    "cluster_scale": 1.0,
+    "mass_threshold": 0.0,
+    "convergence_window": 5,
+    "max_steps": 200000,
+    "exclude_self": True,
+    "convergence_drift_tol": 1e-3,
+    "convergence_spread_factor": 1.0,
+    "output_frame_limit": 400,
+    "experiment_dir": None,
+}
+
+
+def _parse_betas(value: Any) -> List[float]:
+    if isinstance(value, list):
+        return [float(v) for v in value]
+    if isinstance(value, str):
+        return [float(b.strip()) for b in value.split(",") if b.strip()]
+    raise ValueError("betas must be a list or comma-separated string.")
+
+
+def _parse_total_time(value: Any) -> float:
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"inf", "infty", "infinite", "infinity"}:
+            return float("inf")
+    return float(value)
+
+
+def load_config(path: Path) -> RunConfig:
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("Config file must contain a JSON object.")
+
+    merged: Dict[str, Any] = dict(DEFAULT_CONFIG)
+    merged.update(data)
+
+    betas = _parse_betas(merged["betas"])
+    total_time = _parse_total_time(merged["total_time"])
+    if not betas:
+        raise ValueError("At least one beta value is required.")
+    if merged["dimension"] != 2:
+        raise ValueError("This simulator is for S1 (dimension=2).")
+    if merged["n_particles"] <= 0:
+        raise ValueError("n_particles must be positive.")
+    if merged["dt"] <= 0.0:
+        raise ValueError("dt must be positive.")
+    if total_time <= 0.0 and not np.isinf(total_time):
+        raise ValueError("total_time must be positive or inf.")
+    if merged["save_every"] <= 0:
+        raise ValueError("save_every must be positive.")
+    if merged["num_mlp_inits"] <= 0:
+        raise ValueError("num_mlp_inits must be positive.")
+    if merged["num_point_inits"] <= 0:
+        raise ValueError("num_point_inits must be positive.")
+    if merged["plot_interval"] <= 0.0:
+        raise ValueError("plot_interval must be positive.")
+    if merged["cluster_scale"] <= 0.0:
+        raise ValueError("cluster_scale must be positive.")
+    if merged["convergence_window"] <= 0:
+        raise ValueError("convergence_window must be positive.")
+    attention_mode = str(merged.get("attention_mode", "unnormalized")).strip().lower()
+    if attention_mode not in {"unnormalized", "normalized"}:
+        raise ValueError("attention_mode must be 'unnormalized' or 'normalized'.")
+    unnormalized_scale_mode = str(
+        merged.get("unnormalized_scale_mode", "standard")
+    ).strip().lower()
+    if unnormalized_scale_mode not in {"standard", "minus_beta"}:
+        raise ValueError("unnormalized_scale_mode must be 'standard' or 'minus_beta'.")
+    if attention_mode == "normalized" and unnormalized_scale_mode != "standard":
+        warnings.warn(
+            "unnormalized_scale_mode is ignored when attention_mode='normalized'.",
+            RuntimeWarning,
+        )
+    activation = str(merged.get("activation", "relu")).strip().lower()
+    if activation not in {"relu", "gelu"}:
+        raise ValueError("activation must be 'relu' or 'gelu'.")
+    integrator = str(merged.get("integrator", "euler")).strip().lower()
+    if integrator not in {"euler", "rk2", "rk4"}:
+        raise ValueError("integrator must be one of: euler, rk2, rk4.")
+    if merged["max_steps"] <= 0:
+        raise ValueError("max_steps must be positive.")
+    if merged["output_frame_limit"] <= 0:
+        raise ValueError("output_frame_limit must be positive.")
+    if merged["convergence_spread_factor"] < 0.0:
+        raise ValueError("convergence_spread_factor must be non-negative.")
+    if merged["convergence_drift_tol"] < 0.0:
+        raise ValueError("convergence_drift_tol must be non-negative.")
+
+    mlp_units = merged["mlp_units"] if merged["mlp_units"] is not None else merged["dimension"]
+    mlp_scale_mode = str(merged.get("mlp_scale_mode", "fixed")).strip().lower()
+    if mlp_scale_mode not in {"fixed", "exp_beta"}:
+        raise ValueError("mlp_scale_mode must be 'fixed' or 'exp_beta'.")
+    if attention_mode == "normalized" and mlp_scale_mode != "fixed":
+        warnings.warn(
+            "attention_mode='normalized' forces mlp_scale_mode='fixed'.",
+            RuntimeWarning,
+        )
+        mlp_scale_mode = "fixed"
+    if mlp_scale_mode == "fixed":
+        merged["mlp_scale"] = float(merged["mlp_scale"])
+    if merged["mass_threshold"] < 0.0 or merged["mass_threshold"] > 1.0:
+        raise ValueError("mass_threshold must be between 0 and 1.")
+    if merged["particle_seed"] is None or merged["mlp_seed"] is None:
+        raise ValueError("particle_seed and mlp_seed must be set.")
+
+    if np.isinf(total_time):
+        num_steps = int(merged["max_steps"])
+    else:
+        num_steps = int(round(total_time / merged["dt"]))
+    step_warn = 200_000
+    particle_warn = 5_000
+    work_warn = 50_000_000
+    work_estimate = merged["n_particles"] * max(1, num_steps)
+    if (
+        merged["n_particles"] > particle_warn
+        or num_steps > step_warn
+        or work_estimate > work_warn
+    ):
+        warnings.warn(
+            "Large run detected (n_particles, num_steps, or their product is high); "
+            "this may be slow or memory intensive.",
+            RuntimeWarning,
+        )
+
+    experiment_dir = merged.get("experiment_dir")
+    if experiment_dir in (None, ""):
+        experiment_dir = None
+
+    return RunConfig(
+        betas=betas,
+        n_particles=merged["n_particles"],
+        dt=merged["dt"],
+        total_time=total_time,
+        save_every=merged["save_every"],
+        k_max=merged["k_max"],
+        num_mlp_inits=merged["num_mlp_inits"],
+        num_point_inits=merged["num_point_inits"],
+        mlp_units=mlp_units,
+        activation=activation,
+        mlp_scale=merged["mlp_scale"],
+        mlp_scale_mode=mlp_scale_mode,
+        tie_potential=True,
+        particle_seed=int(merged["particle_seed"]),
+        mlp_seed=int(merged["mlp_seed"]),
+        results_dir=Path(merged["results_dir"]),
+        dimension=merged["dimension"],
+        plot_interval=merged["plot_interval"],
+        cluster_scale=merged["cluster_scale"],
+        mass_threshold=merged["mass_threshold"],
+        convergence_window=merged["convergence_window"],
+        attention_mode=attention_mode,
+        unnormalized_scale_mode=unnormalized_scale_mode,
+        integrator=integrator,
+        max_steps=int(merged["max_steps"]),
+        exclude_self=bool(merged["exclude_self"]),
+        convergence_drift_tol=float(merged["convergence_drift_tol"]),
+        convergence_spread_factor=float(merged["convergence_spread_factor"]),
+        output_frame_limit=int(merged["output_frame_limit"]),
+        experiment_dir=Path(experiment_dir) if experiment_dir is not None else None,
+    )
+
+
+def build_seed_plan(config: RunConfig) -> Dict[float, SeedPlan]:
+    plan: Dict[float, SeedPlan] = {}
+    particle_rng = np.random.default_rng(config.particle_seed)
+    mlp_rng = np.random.default_rng(config.mlp_seed)
+    global_particle_seeds = [config.particle_seed]
+    global_mlp_seeds = [config.mlp_seed]
+    if config.num_point_inits > 1:
+        extra = config.num_point_inits - 1
+        global_particle_seeds.extend(
+            particle_rng.integers(0, 2**31 - 1, size=extra, dtype=np.int64).tolist()
+        )
+    if config.num_mlp_inits > 1:
+        extra = config.num_mlp_inits - 1
+        global_mlp_seeds.extend(
+            mlp_rng.integers(0, 2**31 - 1, size=extra, dtype=np.int64).tolist()
+        )
+    for beta in config.betas:
+        plan[beta] = SeedPlan(
+            particle_seeds=global_particle_seeds,
+            mlp_seeds=global_mlp_seeds,
+        )
+    return plan
