@@ -20,7 +20,7 @@ from matplotlib.colors import TwoSlopeNorm, to_rgb
 from matplotlib.patches import Wedge
 from scipy.special import erf
 
-from .dynamics import TWO_PI, gamma_k_s1, mlp_drift
+from .dynamics import TWO_PI, mlp_drift
 
 NULL_COLOR = "#01172F"
 MLP_COLOR = "#446DF6"
@@ -637,12 +637,12 @@ def make_mlp_figure(
     omega: np.ndarray,
     activation: str,
     title: str,
-    tie_potential: bool,
+    gradient_mlp: bool,
     num_points: int = 256,
     vector_points: int = 32,
 ) -> plt.Figure:
-    if not tie_potential:
-        raise ValueError("MLP plot requires a gradient field (tie_potential=True).")
+    if not gradient_mlp:
+        raise ValueError("MLP plot requires a gradient field (gradient_MLP=True).")
     fig, ax = plt.subplots(figsize=(5.5, 5.5))
     ax.set_aspect("equal")
     ax.set_xlim(-1.4, 1.4)
@@ -659,7 +659,7 @@ def make_mlp_figure(
 
     theta = np.linspace(0.0, TWO_PI, num_points, endpoint=False)
 
-    if tie_potential:
+    if gradient_mlp:
         potential = mlp_potential(theta, a, omega, activation)
         centered = potential - potential.mean()
         scale = 0.25 / (np.max(np.abs(centered)) + 1e-8)

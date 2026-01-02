@@ -26,7 +26,7 @@ class RunConfig:
     activation: Activation
     mlp_scale: float
     mlp_scale_mode: str
-    tie_potential: bool
+    gradient_mlp: bool
     particle_seed: int
     mlp_seed: int
     results_dir: Path
@@ -39,7 +39,7 @@ class RunConfig:
     unnormalized_scale_mode: str
     integrator: str
     max_steps: int
-    exclude_self: bool
+    self_attention: bool
     convergence_drift_tol: float
     convergence_spread_factor: float
     output_frame_limit: int
@@ -65,6 +65,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "activation": "relu",
     "mlp_scale": 0.5,
     "mlp_scale_mode": "fixed",
+    "gradient_MLP": True,
     "dimension": 2,
     "attention_mode": "unnormalized",
     "unnormalized_scale_mode": "standard",
@@ -77,7 +78,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "mass_threshold": 0.0,
     "convergence_window": 5,
     "max_steps": 200000,
-    "exclude_self": True,
+    "self_attention": False,
     "convergence_drift_tol": 1e-3,
     "convergence_spread_factor": 1.0,
     "output_frame_limit": 400,
@@ -110,6 +111,16 @@ def load_config(path: Path) -> RunConfig:
 
     merged: Dict[str, Any] = dict(DEFAULT_CONFIG)
     merged.update(data)
+    if "exclude_self" in data:
+        raise ValueError("exclude_self was renamed to self_attention.")
+    if "tie_potential" in data:
+        raise ValueError("tie_potential was renamed to gradient_MLP.")
+    gradient_mlp = merged.get("gradient_MLP", True)
+    if not isinstance(gradient_mlp, bool):
+        raise ValueError("gradient_MLP must be a boolean.")
+    if not gradient_mlp:
+        raise ValueError("gradient_MLP must be true; this simulator enforces a gradient MLP.")
+    merged["gradient_MLP"] = gradient_mlp
 
     betas = _parse_betas(merged["betas"])
     total_time = _parse_total_time(merged["total_time"])
@@ -162,6 +173,8 @@ def load_config(path: Path) -> RunConfig:
         raise ValueError("convergence_spread_factor must be non-negative.")
     if merged["convergence_drift_tol"] < 0.0:
         raise ValueError("convergence_drift_tol must be non-negative.")
+    if not isinstance(merged["self_attention"], bool):
+        raise ValueError("self_attention must be a boolean.")
 
     mlp_units = merged["mlp_units"] if merged["mlp_units"] is not None else merged["dimension"]
     mlp_scale_mode = str(merged.get("mlp_scale_mode", "fixed")).strip().lower()
@@ -216,7 +229,7 @@ def load_config(path: Path) -> RunConfig:
         activation=activation,
         mlp_scale=merged["mlp_scale"],
         mlp_scale_mode=mlp_scale_mode,
-        tie_potential=True,
+        gradient_mlp=gradient_mlp,
         particle_seed=int(merged["particle_seed"]),
         mlp_seed=int(merged["mlp_seed"]),
         results_dir=Path(merged["results_dir"]),
@@ -229,7 +242,7 @@ def load_config(path: Path) -> RunConfig:
         unnormalized_scale_mode=unnormalized_scale_mode,
         integrator=integrator,
         max_steps=int(merged["max_steps"]),
-        exclude_self=bool(merged["exclude_self"]),
+        self_attention=bool(merged["self_attention"]),
         convergence_drift_tol=float(merged["convergence_drift_tol"]),
         convergence_spread_factor=float(merged["convergence_spread_factor"]),
         output_frame_limit=int(merged["output_frame_limit"]),

@@ -24,9 +24,8 @@ from .dynamics import (
     MLPParams,
     SimulationConfig,
     TWO_PI,
-    attention_drift,
-    attention_drift_field,
-    gamma_k_s1,
+    attention_drift_at,
+    attention_drift_particles,
     mlp_drift,
     sample_mlp_params,
     sample_theta0,
@@ -37,6 +36,7 @@ from .io import canonical_json, find_matching_run, make_run_dir, save_gif_from_i
 from .plotting import (
     MLP_COLOR,
     NULL_COLOR,
+    gamma_k_s1,
     make_cluster_bar_plot,
     make_cluster_bar_plot_with_null,
     make_convergence_figure,
@@ -124,7 +124,7 @@ def _build_params_dict(
         "mlp_scale_mode": config.mlp_scale_mode,
         "actual_mlp_scale": actual_mlp_scale,
         "activation": config.activation,
-        "tie_potential": config.tie_potential,
+        "gradient_MLP": config.gradient_mlp,
         "particle_seed": config.particle_seed,
         "mlp_seed": config.mlp_seed,
         "particle_seeds": seeds.particle_seeds,
@@ -139,7 +139,7 @@ def _build_params_dict(
         "attention_mode": config.attention_mode,
         "unnormalized_scale_mode": config.unnormalized_scale_mode,
         "integrator": config.integrator,
-        "exclude_self": config.exclude_self,
+        "self_attention": config.self_attention,
         "output_frame_limit": config.output_frame_limit,
     }
 
@@ -196,12 +196,12 @@ def _simulate_until_convergence(
             if drift_tol <= 0.0:
                 drift_ok = True
             else:
-                drift_check = attention_drift(
+                drift_check = attention_drift_particles(
                     theta,
                     sim_config.beta,
                     sim_config.attention_mode,
                     sim_config.unnormalized_scale_mode,
-                    exclude_self=sim_config.exclude_self,
+                    self_attention=sim_config.self_attention,
                 )
                 if mlp_params is not None:
                     drift_check += mlp_drift(theta, mlp_params)
@@ -362,7 +362,7 @@ def _save_field_gif(
     max_abs = 0.0
     for idx in frame_indices:
         theta_particles = theta_hist[idx]
-        att = attention_drift_field(
+        att = attention_drift_at(
             theta_grid,
             theta_particles,
             beta,
@@ -564,7 +564,13 @@ def _load_run_summaries(
         except (TypeError, ValueError):
             continue
         expected = expected_params.get(beta_value)
-        if expected is None or params_json != expected:
+        if expected is None:
+            continue
+        try:
+            normalized = canonical_json(json.loads(params_json))
+        except Exception:
+            continue
+        if normalized != expected:
             continue
         mtime = summary_path.stat().st_mtime
         existing = summaries.get(beta_value)
@@ -610,7 +616,7 @@ def run_experiment(config: RunConfig) -> None:
     print(f"  convergence_window={config.convergence_window}")
     print(f"  convergence_drift_tol={config.convergence_drift_tol}")
     print(f"  convergence_spread_factor={config.convergence_spread_factor}")
-    print(f"  exclude_self={config.exclude_self}")
+    print(f"  self_attention={config.self_attention}")
     print(f"  output_frame_limit={config.output_frame_limit}")
 
     seed_plan = build_seed_plan(config)
@@ -654,7 +660,7 @@ def run_experiment(config: RunConfig) -> None:
             save_every=config.save_every,
             attention_mode=config.attention_mode,
             unnormalized_scale_mode=config.unnormalized_scale_mode,
-            exclude_self=config.exclude_self,
+            self_attention=config.self_attention,
             integrator=config.integrator,
         )
         if config.mlp_scale_mode == "exp_beta":
@@ -670,7 +676,7 @@ def run_experiment(config: RunConfig) -> None:
             n_units=config.mlp_units,
             activation=config.activation,
             weight_scale=mlp_scale_eff,
-            tie_potential=config.tie_potential,
+            gradient_mlp=config.gradient_mlp,
         )
         if config.mlp_scale_mode == "exp_beta":
             print(f"  mlp_scale=exp(beta) clipped -> {mlp_scale_eff:.4g}")
@@ -719,19 +725,19 @@ def run_experiment(config: RunConfig) -> None:
             null_times.append(times)
             null_steps.append(step_count)
             all_steps.append(step_count)
-            att0 = attention_drift(
+            att0 = attention_drift_particles(
                 theta_hist[0],
                 beta,
                 config.attention_mode,
                 config.unnormalized_scale_mode,
-                exclude_self=config.exclude_self,
+                self_attention=config.self_attention,
             )
-            att_end = attention_drift(
+            att_end = attention_drift_particles(
                 theta_hist[-1],
                 beta,
                 config.attention_mode,
                 config.unnormalized_scale_mode,
-                exclude_self=config.exclude_self,
+                self_attention=config.self_attention,
             )
             max_att0 = float(np.max(np.abs(att0))) if att0.size else 0.0
             max_att_end = float(np.max(np.abs(att_end))) if att_end.size else 0.0
@@ -826,21 +832,21 @@ def run_experiment(config: RunConfig) -> None:
                 mlp_times.append(times)
                 mlp_steps.append(step_count)
                 all_steps.append(step_count)
-                att0 = attention_drift(
+                att0 = attention_drift_particles(
                     theta_hist[0],
                     beta,
                     config.attention_mode,
                     config.unnormalized_scale_mode,
-                    exclude_self=config.exclude_self,
+                    self_attention=config.self_attention,
                 )
                 mlp0 = mlp_drift(theta_hist[0], mlp_params)
                 total0 = att0 + mlp0
-                att_end = attention_drift(
+                att_end = attention_drift_particles(
                     theta_hist[-1],
                     beta,
                     config.attention_mode,
                     config.unnormalized_scale_mode,
-                    exclude_self=config.exclude_self,
+                    self_attention=config.self_attention,
                 )
                 mlp_end = mlp_drift(theta_hist[-1], mlp_params)
                 total_end = att_end + mlp_end

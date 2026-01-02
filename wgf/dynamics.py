@@ -31,7 +31,7 @@ class SimulationConfig:
     save_every: int
     attention_mode: AttentionMode
     unnormalized_scale_mode: UnnormalizedScaleMode
-    exclude_self: bool
+    self_attention: bool
     integrator: Integrator
 
 
@@ -40,7 +40,7 @@ class MLPConfig:
     n_units: int
     activation: Activation
     weight_scale: float
-    tie_potential: bool
+    gradient_mlp: bool
 
 
 def _activation(z: NDArray[np.float64], activation: Activation) -> NDArray[np.float64]:
@@ -61,8 +61,8 @@ def sample_mlp_params(rng: np.random.Generator, config: MLPConfig) -> MLPParams:
 
     The drift is u(x) = proj_x sum_j omega_j * sigma(a_j dot x).
     """
-    if not config.tie_potential:
-        raise ValueError("This simulator enforces a gradient MLP (tie_potential=True).")
+    if not config.gradient_mlp:
+        raise ValueError("This simulator enforces a gradient MLP (gradient_MLP=True).")
     a = rng.normal(size=(config.n_units, 2))
     a /= np.linalg.norm(a, axis=1, keepdims=True)
 
@@ -71,40 +71,56 @@ def sample_mlp_params(rng: np.random.Generator, config: MLPConfig) -> MLPParams:
     return MLPParams(a=a.astype(np.float64), omega=omega.astype(np.float64), activation=config.activation)
 
 
-def attention_drift(
-    theta: NDArray[np.float64],
+def _attention_drift(
+    theta_eval: NDArray[np.float64],
+    theta_particles: NDArray[np.float64],
     beta: float,
     mode: AttentionMode,
-    unnormalized_scale_mode: UnnormalizedScaleMode = "standard",
-    exclude_self: bool = True,
+    unnormalized_scale_mode: UnnormalizedScaleMode,
+    self_attention: bool,
 ) -> NDArray[np.float64]:
-    """Compute the self-attention drift on S1 (USA/SA model in angle form)."""
-    effective_exclude = exclude_self and mode != "normalized"
-    diff = theta[:, None] - theta[None, :]
+    diff = theta_eval[:, None] - theta_particles[None, :]
     arg = beta * np.cos(diff)
-    if effective_exclude:
+    if not self_attention:
         np.fill_diagonal(arg, -np.inf)
 
     row_max = np.max(arg, axis=1, keepdims=True)
     row_max = np.where(np.isfinite(row_max), row_max, 0.0)
-    scaled = np.exp(np.clip(arg - row_max, -80.0, 80.0))
-    if effective_exclude:
-        np.fill_diagonal(scaled, 0.0)
+    weights = np.exp(np.clip(arg - row_max, -80.0, 80.0))
+    if not self_attention:
+        np.fill_diagonal(weights, 0.0)
 
-    weighted = (scaled * np.sin(diff)).sum(axis=1)
+    weighted = (weights * np.sin(diff)).sum(axis=1)
     if mode == "normalized":
-        norm = scaled.sum(axis=1)
-        norm = np.maximum(norm, 1e-12)
-        drift = -weighted / norm
-    else:
-        scale_offset = -beta if unnormalized_scale_mode == "minus_beta" else 0.0
-        scale = np.exp(np.clip(row_max.squeeze() + scale_offset, -80.0, 80.0))
-        weighted = weighted * scale
-        drift = -weighted / max(1, theta.size)
-    return drift
+        norm = np.maximum(weights.sum(axis=1), 1e-12)
+        return weighted / norm
+
+    scale_offset = -beta if unnormalized_scale_mode == "minus_beta" else 0.0
+    scale = np.exp(np.clip(row_max.squeeze() + scale_offset, -80.0, 80.0))
+    weighted = weighted * scale
+    return weighted / max(1, theta_particles.size)
 
 
-def attention_drift_field(
+def attention_drift_particles(
+    theta: NDArray[np.float64],
+    beta: float,
+    mode: AttentionMode,
+    unnormalized_scale_mode: UnnormalizedScaleMode = "standard",
+    self_attention: bool = False,
+) -> NDArray[np.float64]:
+    """Compute the self-attention drift on S1 (USA/SA model in angle form)."""
+    effective_self_attention = self_attention or mode == "normalized"
+    return _attention_drift(
+        theta,
+        theta,
+        beta,
+        mode,
+        unnormalized_scale_mode,
+        effective_self_attention,
+    )
+
+
+def attention_drift_at(
     theta_eval: NDArray[np.float64],
     theta_particles: NDArray[np.float64],
     beta: float,
@@ -112,22 +128,14 @@ def attention_drift_field(
     unnormalized_scale_mode: UnnormalizedScaleMode = "standard",
 ) -> NDArray[np.float64]:
     """Evaluate attention drift at arbitrary angles against a particle set."""
-    diff = theta_eval[:, None] - theta_particles[None, :]
-    arg = beta * np.cos(diff)
-    row_max = np.max(arg, axis=1, keepdims=True)
-    row_max = np.where(np.isfinite(row_max), row_max, 0.0)
-    scaled = np.exp(np.clip(arg - row_max, -80.0, 80.0))
-    weighted = (scaled * np.sin(diff)).sum(axis=1)
-    if mode == "normalized":
-        norm = scaled.sum(axis=1)
-        norm = np.maximum(norm, 1e-12)
-        drift = -weighted / norm
-    else:
-        scale_offset = -beta if unnormalized_scale_mode == "minus_beta" else 0.0
-        scale = np.exp(np.clip(row_max.squeeze() + scale_offset, -80.0, 80.0))
-        weighted = weighted * scale
-        drift = -weighted / max(1, theta_particles.size)
-    return drift
+    return _attention_drift(
+        theta_eval,
+        theta_particles,
+        beta,
+        mode,
+        unnormalized_scale_mode,
+        self_attention=True,
+    )
 
 
 def mlp_drift(theta: NDArray[np.float64], params: MLPParams) -> NDArray[np.float64]:
@@ -177,12 +185,12 @@ def _total_drift(
     sim_config: SimulationConfig,
     mlp_params: Optional[MLPParams],
 ) -> NDArray[np.float64]:
-    drift = attention_drift(
+    drift = attention_drift_particles(
         theta,
         sim_config.beta,
         sim_config.attention_mode,
         sim_config.unnormalized_scale_mode,
-        exclude_self=sim_config.exclude_self,
+        self_attention=sim_config.self_attention,
     )
     if mlp_params is not None:
         drift += mlp_drift(theta, mlp_params)
@@ -212,5 +220,3 @@ def step_theta(
     else:
         raise ValueError(f"Unknown integrator: {sim_config.integrator}")
     return np.mod(theta_next, TWO_PI)
-
-
