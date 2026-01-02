@@ -1,11 +1,7 @@
 # Self-Attention + MLP Drift (S1) Simulations
 
-This repo generates plots for S1 particle dynamics with
+This repo generates Figure-2-style plots for S1 particle dynamics with
 self-attention and a fixed MLP drift term.
-
-<p align="center">
-  <img src="example/evolution_MLP_comparison.gif" alt="Evolution MLP comparison" width="700">
-</p>
 
 ## Quick start
 
@@ -51,13 +47,13 @@ If a matching `params.json` already exists, the run is skipped.
 ## Notes
 - `particle_seed` and `mlp_seed` in `config.json` deterministically fix both particle and MLP initializations. With `num_mlp_inits = 1` and unchanged hyperparameters, the MLP parameters are identical across runs.
 - `convergence_window` controls how many saved frames must keep the same cluster count to declare convergence.
-- By default the MLP has one layer with `d` units (here `d=2`) and is constrained to be a gradient field.
+- By default the MLP has one layer with `d` units (here `d=2`) and is constrained to be a gradient field (`gradient_MLP = true`).
 - Use `plot_interval` in `config.json` to set the frame spacing for the evolution GIFs.
 - The left panel shows the MLP-null density evolution with kmax noted in the title.
 - Use `attention_mode = "normalized"` in `config.json` to switch to normalized self-attention.
 - Use `integrator = "rk2"` or `"rk4"` in `config.json` for higher-order time stepping (default is `"euler"`).
 - Set `total_time` to `"inf"` to run until convergence; `max_steps` caps the run.
-- `exclude_self = true` removes self-interactions in attention (ignored when `attention_mode = "normalized"`). `convergence_drift_tol` and `convergence_spread_factor` control the auto-stop criteria for `"inf"`.
+- `self_attention = false` removes self-interactions in attention (ignored when `attention_mode = "normalized"`). `convergence_drift_tol` and `convergence_spread_factor` control the auto-stop criteria for `"inf"`.
 - `output_frame_limit` skips GIF generation when too many frames would be produced.
 - Set `mlp_scale_mode = "exp_beta"` to use `exp(beta)` (clipped at `exp(12)`) for each beta.
 - Set `experiment_dir` in `config.json` to reuse an existing experiment folder and regenerate `stats/` using already-finished betas.
