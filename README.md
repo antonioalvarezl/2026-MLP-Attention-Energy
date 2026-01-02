@@ -3,6 +3,10 @@
 This repo generates plots for S1 particle dynamics with
 self-attention and a fixed MLP drift term.
 
+<p align="center">
+  <img src="example/evolution_MLP_comparison.gif" alt="Evolution MLP comparison" width="700">
+</p>
+
 ## Quick start
 
 1) Install deps
