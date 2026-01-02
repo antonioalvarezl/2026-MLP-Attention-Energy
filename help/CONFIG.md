@@ -18,6 +18,7 @@ and any special behavior.
 - mlp_scale: float; only used when mlp_scale_mode is "fixed".
 - mlp_scale_mode: one of "fixed" or "exp_beta".
   If "exp_beta", scale is exp(beta) clipped at exp(12).
+- gradient_MLP: bool; must be true (the MLP is constrained to be a gradient field).
 - dimension: must be 2 (this code is for S1).
 - attention_mode: one of "unnormalized" or "normalized".
   If "normalized", mlp_scale_mode is forced to "fixed".
@@ -35,11 +36,11 @@ and any special behavior.
 - cluster_scale: float > 0; cluster threshold is cluster_scale / sqrt(beta).
 - mass_threshold: float in [0, 1].
 - convergence_window: int > 0; window size for convergence detection.
-- exclude_self: bool; ignored when attention_mode is "normalized".
+- self_attention: bool; if false, self interactions are removed (ignored when attention_mode is "normalized").
 - convergence_drift_tol: float >= 0; only used when total_time is infinite.
 - convergence_spread_factor: float >= 0; only used when total_time is infinite.
 - output_frame_limit: int > 0; max frames before skipping GIF creation.
 
 Notes:
 - num_steps is derived from total_time and dt (or max_steps for total_time=inf).
-- tie_potential is always true in code and is not configurable.
+- gradient_MLP is always true in code and is not configurable.
