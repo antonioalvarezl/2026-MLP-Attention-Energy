@@ -48,6 +48,7 @@ $$
 + u_{\mathrm{MLP}}(\theta_i).
 + \end{aligned}
 $$
+```
 
 Here $s=-1$ if `ascending=true` (gradient ascent) and $s=+1$ if
 `ascending=false` (gradient descent). In USA, setting `self_attention=false`
