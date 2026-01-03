@@ -30,18 +30,23 @@ The two dynamics are:
 **Unnormalized self-attention (USA):**
 
 $$
+\begin{aligned}
 \dot{\theta}_i
-= s \cdot \frac{1}{N}\sum_{j=1}^N w_{ij}\,\sin(\theta_i - \theta_j)
-+ u_{\mathrm{MLP}}(\theta_i).
+&= s \cdot \frac{1}{N}\sum_{j=1}^N w_{ij}\,\sin(\theta_i - \theta_j)
+ + u_{\mathrm{MLP}}(\theta_i).
+\end{aligned}
 $$
+
 
 **Normalized self-attention (SA):**
 
 $$
+\begin{aligned}
 \dot{\theta}_i
-= s \cdot
+&= s \cdot
 \frac{\sum_{j=1}^N w_{ij}\,\sin(\theta_i - \theta_j)}{\sum_{j=1}^N w_{ij}}
 + u_{\mathrm{MLP}}(\theta_i).
++ \end{aligned}
 $$
 
 Here $s=-1$ if `ascending=true` (gradient ascent) and $s=+1$ if
