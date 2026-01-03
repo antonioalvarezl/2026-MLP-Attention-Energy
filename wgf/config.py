@@ -25,7 +25,6 @@ class RunConfig:
     mlp_units: int
     activation: Activation
     mlp_scale: float
-    mlp_scale_mode: str
     gradient_mlp: bool
     particle_seed: int
     mlp_seed: int
@@ -36,10 +35,10 @@ class RunConfig:
     mass_threshold: float
     convergence_window: int
     attention_mode: str
-    unnormalized_scale_mode: str
     integrator: str
     max_steps: int
     self_attention: bool
+    ascending: bool
     convergence_drift_tol: float
     convergence_spread_factor: float
     output_frame_limit: int
@@ -64,11 +63,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "mlp_units": None,
     "activation": "relu",
     "mlp_scale": 0.5,
-    "mlp_scale_mode": "fixed",
     "gradient_MLP": True,
     "dimension": 2,
     "attention_mode": "unnormalized",
-    "unnormalized_scale_mode": "standard",
     "integrator": "euler",
     "particle_seed": 7,
     "mlp_seed": 11,
@@ -79,6 +76,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "convergence_window": 5,
     "max_steps": 200000,
     "self_attention": False,
+    "ascending": False,
     "convergence_drift_tol": 1e-3,
     "convergence_spread_factor": 1.0,
     "output_frame_limit": 400,
@@ -149,16 +147,6 @@ def load_config(path: Path) -> RunConfig:
     attention_mode = str(merged.get("attention_mode", "unnormalized")).strip().lower()
     if attention_mode not in {"unnormalized", "normalized"}:
         raise ValueError("attention_mode must be 'unnormalized' or 'normalized'.")
-    unnormalized_scale_mode = str(
-        merged.get("unnormalized_scale_mode", "standard")
-    ).strip().lower()
-    if unnormalized_scale_mode not in {"standard", "minus_beta"}:
-        raise ValueError("unnormalized_scale_mode must be 'standard' or 'minus_beta'.")
-    if attention_mode == "normalized" and unnormalized_scale_mode != "standard":
-        warnings.warn(
-            "unnormalized_scale_mode is ignored when attention_mode='normalized'.",
-            RuntimeWarning,
-        )
     activation = str(merged.get("activation", "relu")).strip().lower()
     if activation not in {"relu", "gelu"}:
         raise ValueError("activation must be 'relu' or 'gelu'.")
@@ -175,19 +163,11 @@ def load_config(path: Path) -> RunConfig:
         raise ValueError("convergence_drift_tol must be non-negative.")
     if not isinstance(merged["self_attention"], bool):
         raise ValueError("self_attention must be a boolean.")
+    if not isinstance(merged["ascending"], bool):
+        raise ValueError("ascending must be a boolean.")
 
     mlp_units = merged["mlp_units"] if merged["mlp_units"] is not None else merged["dimension"]
-    mlp_scale_mode = str(merged.get("mlp_scale_mode", "fixed")).strip().lower()
-    if mlp_scale_mode not in {"fixed", "exp_beta"}:
-        raise ValueError("mlp_scale_mode must be 'fixed' or 'exp_beta'.")
-    if attention_mode == "normalized" and mlp_scale_mode != "fixed":
-        warnings.warn(
-            "attention_mode='normalized' forces mlp_scale_mode='fixed'.",
-            RuntimeWarning,
-        )
-        mlp_scale_mode = "fixed"
-    if mlp_scale_mode == "fixed":
-        merged["mlp_scale"] = float(merged["mlp_scale"])
+    merged["mlp_scale"] = float(merged["mlp_scale"])
     if merged["mass_threshold"] < 0.0 or merged["mass_threshold"] > 1.0:
         raise ValueError("mass_threshold must be between 0 and 1.")
     if merged["particle_seed"] is None or merged["mlp_seed"] is None:
@@ -228,7 +208,6 @@ def load_config(path: Path) -> RunConfig:
         mlp_units=mlp_units,
         activation=activation,
         mlp_scale=merged["mlp_scale"],
-        mlp_scale_mode=mlp_scale_mode,
         gradient_mlp=gradient_mlp,
         particle_seed=int(merged["particle_seed"]),
         mlp_seed=int(merged["mlp_seed"]),
@@ -239,10 +218,10 @@ def load_config(path: Path) -> RunConfig:
         mass_threshold=merged["mass_threshold"],
         convergence_window=merged["convergence_window"],
         attention_mode=attention_mode,
-        unnormalized_scale_mode=unnormalized_scale_mode,
         integrator=integrator,
         max_steps=int(merged["max_steps"]),
         self_attention=bool(merged["self_attention"]),
+        ascending=bool(merged["ascending"]),
         convergence_drift_tol=float(merged["convergence_drift_tol"]),
         convergence_spread_factor=float(merged["convergence_spread_factor"]),
         output_frame_limit=int(merged["output_frame_limit"]),

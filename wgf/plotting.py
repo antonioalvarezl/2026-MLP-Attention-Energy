@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import List, Optional
 from numpy.typing import NDArray
-import matplotlib
+import matplotlib as mpl
 import numpy as np
 from scipy.special import iv
 
@@ -13,17 +13,31 @@ ROOT = Path(__file__).resolve().parent
 os.environ.setdefault("MPLCONFIGDIR", str(ROOT / ".matplotlib"))
 (ROOT / ".matplotlib").mkdir(exist_ok=True)
 
-matplotlib.use("Agg")
+mpl.use("Agg")
+mpl.rcParams.update(
+    {
+        "text.usetex": True,
+        "font.family": "serif",
+        "font.serif": ["Computer Modern Roman"],
+    }
+)
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
-from matplotlib.colors import TwoSlopeNorm, to_rgb
+from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm, to_rgb
 from matplotlib.patches import Wedge
 from scipy.special import erf
 
 from .dynamics import TWO_PI, mlp_drift
 
-NULL_COLOR = "#01172F"
-MLP_COLOR = "#446DF6"
+POTENTIAL_POS_COLOR = "#009E73"
+POTENTIAL_NEG_COLOR =  "#D55E00"
+NULL_COLOR ="#ED5E93"
+MLP_COLOR =  "#0072B2"
+POINT_COLOR ="#000000"
+POTENTIAL_CMAP = LinearSegmentedColormap.from_list(
+    "potential",
+    [POTENTIAL_NEG_COLOR, "#FFFFFF", POTENTIAL_POS_COLOR],
+)
 
 
 def _latex_text(label: str) -> str:
@@ -52,18 +66,8 @@ def plot_gamma(ax, beta: float, k_limit: int, k_max: int) -> None:
     k_cont = np.linspace(0.0, k_display_max, 400)
     gamma_cont = gamma_k_s1(beta, k_cont)
 
-    ax.plot(k_cont, gamma_cont, "--", color="tab:blue", alpha=0.8, linewidth=1.0)
-    ax.scatter(k_int, gamma_int, color="tab:blue", s=18)
-    ax.axvline(k_max, color="red", linestyle="--", linewidth=1.2)
-    ax.text(
-        k_max,
-        float(np.max(gamma_int)),
-        rf"$k_{{\mathrm{{max}}}}={k_max}$",
-        color="red",
-        ha="left",
-        va="bottom",
-        fontsize=9,
-    )
+    ax.plot(k_cont, gamma_cont, "--", color=NULL_COLOR, alpha=0.8, linewidth=1.0)
+    ax.scatter(k_int, gamma_int, color=NULL_COLOR, s=18)
     ax.set_xlabel(r"$k$")
     ax.set_ylabel(r"$\gamma_k$")
     ax.set_xlim(0.0, k_display_max)
@@ -164,6 +168,8 @@ def plot_trajectories(
     max_particles: int = 200,
     time_stride: int = 1,
     time_scale: str = "linear",
+    line_width: float = 0.6,
+    line_style: Optional[object] = None,
 ) -> None:
     if time_stride < 1:
         time_stride = 1
@@ -216,7 +222,9 @@ def plot_trajectories(
                 colors.append((base[0], base[1], base[2], alpha))
 
     if segments:
-        lc = LineCollection(segments, colors=colors, linewidths=0.6)
+        lc = LineCollection(segments, colors=colors, linewidths=line_width)
+        if line_style is not None:
+            lc.set_linestyle(line_style)
         ax.add_collection(lc)
 
     ax.set_ylim(0.0, TWO_PI)
@@ -338,7 +346,7 @@ def plot_histogram_with_potential(
                 potential[None, :],
                 extent=(0.0, TWO_PI, 0.0, max_height * 1.05),
                 aspect="auto",
-                cmap="RdYlGn",
+                cmap=POTENTIAL_CMAP,
                 alpha=0.35,
                 norm=norm,
                 origin="lower",
@@ -411,22 +419,16 @@ def make_figure_mlp(
             null_hist,
             color=NULL_COLOR,
             time_scale=time_scale,
+            line_style="solid",
         )
-        if null_title is None:
-            axes[row, 0].set_title(rf"MLP$_{{\mathrm{{null}}}}$ ($k_{{\mathrm{{max}}}}={k_max}$)")
-        else:
-            axes[row, 0].set_title(null_title)
         plot_trajectories(
             axes[row, 1],
             mlp_times_list[row],
             mlp_hist,
             color=MLP_COLOR,
             time_scale=time_scale,
+            line_style="solid",
         )
-        if mlp_title is None:
-            axes[row, 1].set_title(_latex_text(label))
-        else:
-            axes[row, 1].set_title(mlp_title)
         plot_histogram_with_potential(
             axes[row, 2],
             mlp_hist[-1],
@@ -441,7 +443,7 @@ def make_figure_mlp(
 
 def save_figure(fig, output_stem: Path, formats: tuple[str, ...] = ("png", "pdf")) -> None:
     for fmt in formats:
-        fig.savefig(output_stem.with_suffix(f".{fmt}"), dpi=200)
+        fig.savefig(output_stem.with_suffix(f".{fmt}"), dpi=300)
 
 
 def make_cluster_stats_plot(
@@ -459,7 +461,6 @@ def make_cluster_stats_plot(
     ax.set_xlabel(r"$\sqrt{\beta}$")
     ax.set_ylabel(_latex_text(ylabel))
     ax.set_title(_latex_text(title))
-    ax.legend()
     ax.grid(True, alpha=0.3)
     return fig
 
@@ -561,7 +562,6 @@ def make_convergence_figure(
 
     for row, (beta, times, theta_hist, k_max) in enumerate(zip(betas, times_list, histories, k_max_list)):
         plot_gamma(axes[row, 0], beta, k_limit, k_max)
-        axes[row, 0].set_title(rf"$\beta={beta}$")
         plot_trajectories(axes[row, 1], times, theta_hist, color=color, time_scale=time_scale)
         plot_histogram_1d(axes[row, 2], theta_hist[-1], color=color)
 
@@ -617,7 +617,7 @@ def _draw_potential_inside(
         inner = max(0.0, radius - depth)
         if inner >= radius:
             continue
-        color = "green" if value >= 0.0 else "red"
+        color = POTENTIAL_POS_COLOR if value >= 0.0 else POTENTIAL_NEG_COLOR
         patch = Wedge(
             (0.0, 0.0),
             radius,
@@ -669,7 +669,9 @@ def make_mlp_figure(
         segments = np.concatenate([segments, coords[-1:, None, :].repeat(2, axis=1)], axis=0)
         segments[-1, 1, :] = coords[0]
         colors = np.concatenate([potential[:-1], potential[-1:]])
-        line = LineCollection(segments, array=colors, cmap="viridis", linewidth=3.0)
+        max_abs = np.max(np.abs(potential))
+        norm = TwoSlopeNorm(vcenter=0.0, vmin=-max_abs, vmax=max_abs) if max_abs > 0.0 else None
+        line = LineCollection(segments, array=colors, cmap=POTENTIAL_CMAP, norm=norm, linewidth=3.0)
         ax.add_collection(line)
 
     class _Params:
@@ -690,7 +692,7 @@ def make_mlp_figure(
         angles="xy",
         scale_units="xy",
         scale=4.0,
-        color="tab:red",
+        color=MLP_COLOR,
         width=0.004,
     )
 
@@ -720,7 +722,7 @@ def make_histogram_frame(
     potential = mlp_potential(theta_grid, a, omega, activation)
     _draw_potential_inside(ax, theta_grid, potential)
 
-    ax.scatter(np.cos(theta), np.sin(theta), s=6, color="tab:orange", alpha=0.6, zorder=4)
+    ax.scatter(np.cos(theta), np.sin(theta), s=6, color=POINT_COLOR, alpha=0.6, zorder=4)
     ax.set_title(
         rf"$\mathrm{{{attention_label}}},\ t={time_value:.3f},\ \beta={beta:g},\ "
         rf"N={n_particles},\ {mlp_title}$"
@@ -759,7 +761,7 @@ def make_histogram_comparison_frame(
         np.cos(theta_null),
         np.sin(theta_null),
         s=6,
-        color="tab:orange",
+        color=POINT_COLOR,
         alpha=0.6,
         zorder=4,
     )
@@ -767,7 +769,7 @@ def make_histogram_comparison_frame(
         np.cos(theta_mlp),
         np.sin(theta_mlp),
         s=6,
-        color="tab:orange",
+        color=POINT_COLOR,
         alpha=0.6,
         zorder=4,
     )
@@ -804,7 +806,7 @@ def make_field_frame(
             potential[None, :],
             extent=(0.0, TWO_PI, y_min, y_max),
             aspect="auto",
-            cmap="RdYlGn",
+            cmap=POTENTIAL_CMAP,
             alpha=0.35,
             norm=norm,
             origin="lower",
@@ -815,7 +817,7 @@ def make_field_frame(
         ax.plot(
             theta,
             attention_field,
-            color="tab:blue",
+            color=NULL_COLOR,
             linewidth=1.2,
             linestyle="--",
             label=r"$u_{\mathrm{att}}$",
@@ -824,7 +826,7 @@ def make_field_frame(
         ax.plot(
             theta,
             mlp_field,
-            color="tab:red",
+            color=MLP_COLOR,
             linewidth=1.2,
             linestyle="--",
             label=r"$u_{\mathrm{mlp}}$",
@@ -839,5 +841,4 @@ def make_field_frame(
         rf"$\mathrm{{{attention_label}}},\ t={time_value:.3f},\ \beta={beta:g},\ "
         rf"N={n_particles},\ {mlp_title}$"
     )
-    ax.legend(loc="upper right", frameon=False, fontsize=8)
     return fig

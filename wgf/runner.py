@@ -121,7 +121,6 @@ def _build_params_dict(
         "num_mlp_inits": config.num_mlp_inits,
         "mlp_units": config.mlp_units,
         "mlp_scale": config.mlp_scale,
-        "mlp_scale_mode": config.mlp_scale_mode,
         "actual_mlp_scale": actual_mlp_scale,
         "activation": config.activation,
         "gradient_MLP": config.gradient_mlp,
@@ -137,9 +136,9 @@ def _build_params_dict(
         "convergence_drift_tol": config.convergence_drift_tol,
         "convergence_spread_factor": config.convergence_spread_factor,
         "attention_mode": config.attention_mode,
-        "unnormalized_scale_mode": config.unnormalized_scale_mode,
         "integrator": config.integrator,
         "self_attention": config.self_attention,
+        "ascending": config.ascending,
         "output_frame_limit": config.output_frame_limit,
     }
 
@@ -200,8 +199,8 @@ def _simulate_until_convergence(
                     theta,
                     sim_config.beta,
                     sim_config.attention_mode,
-                    sim_config.unnormalized_scale_mode,
                     self_attention=sim_config.self_attention,
+                    ascending=sim_config.ascending,
                 )
                 if mlp_params is not None:
                     drift_check += mlp_drift(theta, mlp_params)
@@ -334,7 +333,7 @@ def _save_field_gif(
     mlp_title: str,
     attention_label: str,
     attention_mode: str,
-    unnormalized_scale_mode: str,
+    ascending: bool,
     a: np.ndarray,
     omega: np.ndarray,
     activation: str,
@@ -367,7 +366,7 @@ def _save_field_gif(
             theta_particles,
             beta,
             attention_mode,
-            unnormalized_scale_mode,
+            ascending=ascending,
         )
         mlp = mlp_drift(theta_grid, params)
         field = att + mlp
@@ -431,7 +430,7 @@ def _common_frame_indices(
 ) -> tuple[list[int], list[int], list[float]]:
     if times_a.size == 0 or times_b.size == 0:
         return [], [], []
-    max_time = min(float(times_a[-1]), float(times_b[-1]))
+    max_time = max(float(times_a[-1]), float(times_b[-1]))
     if max_time <= 0.0:
         target_times = np.array([0.0])
     else:
@@ -440,7 +439,20 @@ def _common_frame_indices(
     idx_b = np.searchsorted(times_b, target_times, side="left")
     idx_a = np.clip(idx_a, 0, len(times_a) - 1)
     idx_b = np.clip(idx_b, 0, len(times_b) - 1)
-    return idx_a.tolist(), idx_b.tolist(), target_times.tolist()
+
+    filtered_a: list[int] = []
+    filtered_b: list[int] = []
+    filtered_times: list[float] = []
+    prev_key: Optional[tuple[int, int]] = None
+    for a_idx, b_idx, t in zip(idx_a, idx_b, target_times):
+        key = (int(a_idx), int(b_idx))
+        if key == prev_key:
+            continue
+        prev_key = key
+        filtered_a.append(key[0])
+        filtered_b.append(key[1])
+        filtered_times.append(float(t))
+    return filtered_a, filtered_b, filtered_times
 
 
 def _save_comparison_gif(
@@ -600,12 +612,10 @@ def run_experiment(config: RunConfig) -> None:
     print(f"  num_steps={num_steps}")
     print(f"  save_every={config.save_every}")
     print(f"  attention_mode={config.attention_mode}")
-    print(f"  unnormalized_scale_mode={config.unnormalized_scale_mode}")
     print(f"  integrator={config.integrator}")
     print(f"  activation={config.activation}")
     print(f"  mlp_units={config.mlp_units}")
     print(f"  mlp_scale={config.mlp_scale}")
-    print(f"  mlp_scale_mode={config.mlp_scale_mode}")
     print(f"  num_mlp_inits={config.num_mlp_inits}")
     print(f"  num_point_inits={config.num_point_inits}")
     print(f"  particle_seed={config.particle_seed}")
@@ -617,6 +627,7 @@ def run_experiment(config: RunConfig) -> None:
     print(f"  convergence_drift_tol={config.convergence_drift_tol}")
     print(f"  convergence_spread_factor={config.convergence_spread_factor}")
     print(f"  self_attention={config.self_attention}")
+    print(f"  ascending={config.ascending}")
     print(f"  output_frame_limit={config.output_frame_limit}")
 
     seed_plan = build_seed_plan(config)
@@ -659,16 +670,12 @@ def run_experiment(config: RunConfig) -> None:
             num_steps=num_steps,
             save_every=config.save_every,
             attention_mode=config.attention_mode,
-            unnormalized_scale_mode=config.unnormalized_scale_mode,
             self_attention=config.self_attention,
+            ascending=config.ascending,
             integrator=config.integrator,
         )
-        if config.mlp_scale_mode == "exp_beta":
-            mlp_scale_eff = float(np.exp(min(beta, 12.0)))
-            mlp_std_label = r"\exp(\beta)"
-        else:
-            mlp_scale_eff = float(config.mlp_scale)
-            mlp_std_label = f"{mlp_scale_eff:.3g}"
+        mlp_scale_eff = float(config.mlp_scale)
+        mlp_std_label = f"{mlp_scale_eff:.3g}"
         mlp_title = rf"\mathrm{{std(MLP)}}\,=\,{mlp_std_label}"
         mlp_null_title = r"\mathrm{MLP}\,=\,0"
         attention_label = "USA" if config.attention_mode == "unnormalized" else "SA"
@@ -678,8 +685,6 @@ def run_experiment(config: RunConfig) -> None:
             weight_scale=mlp_scale_eff,
             gradient_mlp=config.gradient_mlp,
         )
-        if config.mlp_scale_mode == "exp_beta":
-            print(f"  mlp_scale=exp(beta) clipped -> {mlp_scale_eff:.4g}")
         all_steps: list[int] = []
         did_not_converge = False
 
@@ -729,15 +734,15 @@ def run_experiment(config: RunConfig) -> None:
                 theta_hist[0],
                 beta,
                 config.attention_mode,
-                config.unnormalized_scale_mode,
                 self_attention=config.self_attention,
+                ascending=config.ascending,
             )
             att_end = attention_drift_particles(
                 theta_hist[-1],
                 beta,
                 config.attention_mode,
-                config.unnormalized_scale_mode,
                 self_attention=config.self_attention,
+                ascending=config.ascending,
             )
             max_att0 = float(np.max(np.abs(att0))) if att0.size else 0.0
             max_att_end = float(np.max(np.abs(att_end))) if att_end.size else 0.0
@@ -781,7 +786,7 @@ def run_experiment(config: RunConfig) -> None:
                 color=NULL_COLOR,
                 plot_interval=config.plot_interval,
                 output_frame_limit=config.output_frame_limit,
-                save_gif=False,
+                save_gif=True,
             )
             if is_infinite:
                 conv_idx = len(theta_hist) - 1
@@ -836,8 +841,8 @@ def run_experiment(config: RunConfig) -> None:
                     theta_hist[0],
                     beta,
                     config.attention_mode,
-                    config.unnormalized_scale_mode,
                     self_attention=config.self_attention,
+                    ascending=config.ascending,
                 )
                 mlp0 = mlp_drift(theta_hist[0], mlp_params)
                 total0 = att0 + mlp0
@@ -845,8 +850,8 @@ def run_experiment(config: RunConfig) -> None:
                     theta_hist[-1],
                     beta,
                     config.attention_mode,
-                    config.unnormalized_scale_mode,
                     self_attention=config.self_attention,
+                    ascending=config.ascending,
                 )
                 mlp_end = mlp_drift(theta_hist[-1], mlp_params)
                 total_end = att_end + mlp_end
@@ -912,7 +917,7 @@ def run_experiment(config: RunConfig) -> None:
                     mlp_title,
                     attention_label,
                     config.attention_mode,
-                    config.unnormalized_scale_mode,
+                    config.ascending,
                     a=mlp_params.a,
                     omega=mlp_params.omega,
                     activation=mlp_params.activation,
