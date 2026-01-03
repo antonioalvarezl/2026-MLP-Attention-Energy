@@ -9,14 +9,14 @@ unnormalized self-attention (USA) and normalized self-attention (SA).
 Let $x_i(t) = (\cos \theta_i(t), \sin \theta_i(t)) \in S^1$ and let
 $t(\theta) = (-\sin \theta, \cos \theta)$ be the unit tangent. Define
 \[
-w_{ij} \;=\; \exp\!\bigl(\beta (x_i \cdot x_j - 1)\bigr)
-\;=\; \exp\!\bigl(\beta (\cos(\theta_i - \theta_j) - 1)\bigr).
+w_{ij} = \exp\!\bigl(\beta (x_i \cdot x_j - 1)\bigr)
+= \exp\!\bigl(\beta (\cos(\theta_i - \theta_j) - 1)\bigr).
 \]
 
 The MLP drift is
 \[
 u_{\mathrm{MLP}}(\theta)
-\;=\;
+=
 t(\theta)\cdot \sum_{m=1}^k \omega_m\,\sigma\!\bigl(a_m \cdot x(\theta)\bigr),
 \]
 where $a_m \in S^1$, $\omega_m = s_m a_m$ (gradient field), and
@@ -27,19 +27,19 @@ The two dynamics are:
 **Unnormalized self-attention (USA):**
 \[
 \dot{\theta}_i
-\;=\;
-s \cdot \frac{1}{N}\sum_{j=1}^N w_{ij}\,\sin(\theta_i - \theta_j)
-\;+\;
+=
+s \cdot \frac{1}{N}\sum_{j=1}^N w_{ij}\sin(\theta_i - \theta_j)
++
 u_{\mathrm{MLP}}(\theta_i).
 \]
 
 **Normalized self-attention (SA):**
 \[
 \dot{\theta}_i
-\;=\;
+=
 s \cdot
 \frac{\sum_{j=1}^N w_{ij}\,\sin(\theta_i - \theta_j)}{\sum_{j=1}^N w_{ij}}
-\;+\;
++
 u_{\mathrm{MLP}}(\theta_i).
 \]
 
@@ -51,8 +51,8 @@ included.
 For USA, the self-attention drift corresponds to the gradient flow of
 \[
 \mathsf{E}_{\beta}[\mu]
-\;=\;
-\frac{1}{2\beta}\iint e^{\beta x\cdot y}\,d\mu(x)\,d\mu(y),
+=
+\frac{1}{2\beta}\iint e^{\beta x\cdot y}d\mu(x)d\mu(y),
 \]
 up to a constant shift induced by $x\cdot y - 1$.
 
