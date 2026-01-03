@@ -1,7 +1,6 @@
 # Self-Attention + MLP Drift (S1) Simulations
 
-This repo generates Figure-2-style plots for S1 particle dynamics with
-self-attention and a fixed MLP drift term.
+This repo simulates S1 particle dynamics with self-attention and a fixed MLP drift term.
 
 
 ![Evolution MLP comparison](example/evolution_MLP_comparison.gif)
