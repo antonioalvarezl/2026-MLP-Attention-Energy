@@ -5,6 +5,9 @@ circle $\\mathbb{S}^1$, interpreted as a gradient flow. Two variants are support
 unnormalized self-attention (USA) and normalized self-attention (SA).
 
 
+![Demo](example/evolution_MLP_comparison.gif)
+
+
 ## Quick start
 
 1) Install dependencies
