@@ -1,4 +1,4 @@
-# Transformer Dynamics as Gradient Flow on S¹
+# Transformer Dynamics as Gradient Flow on the circle
 
 This repo simulates transformer-style dynamics (self-attention + MLP) on the unit
 circle $S^1$, interpreted as a gradient flow. Two variants are supported:
