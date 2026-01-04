@@ -6,13 +6,10 @@ unnormalized self-attention (USA) and normalized self-attention (SA).
 
 **Unnormalized self-attention**
 
-![Demo](example/USA.gif)
-![Demo field](example/field_USA.gif)
+![Demo](example/USA_with_field.gif)
 
 **Normalized self-attention**
-![Demo](example/SA.gif)
-![Demo field](example/field_SA.gif)
-
+![Demo](example/SA_with_field.gif)
 ## Quick start
 
 1) Install dependencies
