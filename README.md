@@ -6,9 +6,10 @@ unnormalized self-attention (USA) and normalized self-attention (SA).
 
 
 ![Demo](example/USA.gif)
+![Demo field](example/field_USA.gif)
 
 ![Demo](example/SA.gif)
-
+![Demo field](example/field_SA.gif)
 
 ## Quick start
 
