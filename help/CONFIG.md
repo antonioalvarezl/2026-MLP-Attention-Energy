@@ -55,6 +55,7 @@ defaults live in `wgf/config.py` under `DEFAULT_CONFIG`.
 - results_dir: path; base output directory.
 - experiment_dir: optional path; if set, outputs go there and are reused to
   continue betas. Existing betas are skipped and still counted for stats.
+- gifs: bool; if false, skip generating GIFs (frames are still saved).
 - plot_interval: float > 0; time spacing for GIF frames.
 - output_frame_limit: int > 0; if exceeded, GIFs are skipped but
   `frame_first/middle/last` are still saved.
