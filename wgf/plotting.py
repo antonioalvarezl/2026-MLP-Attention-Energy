@@ -1,4 +1,4 @@
-"""Plot utilities for Figure-2-style outputs."""
+"""Plot utilities for figure outputs."""
 from __future__ import annotations
 
 import os
@@ -178,8 +178,8 @@ def plot_trajectories(
     color: str,
     angle_bins: int = 120,
     time_bins: int = 200,
-    max_particles: int = 200,
-    time_stride: int = 5,
+    max_particles: int = 80,
+    time_stride: int = 1,
     time_scale: str = "linear",
     line_width: float = 0.6,
     line_style: Optional[object] = None,
@@ -511,24 +511,6 @@ def save_figure(fig, output_stem: Path, formats: tuple[str, ...] = ("pdf",)) -> 
     for fmt in formats:
         fig.savefig(output_stem.with_suffix(f".{fmt}"), dpi=PLOT_DPI)
 
-
-def make_cluster_stats_plot(
-    sqrt_betas: np.ndarray,
-    null_mean: np.ndarray,
-    null_std: np.ndarray,
-    mlp_mean: np.ndarray,
-    mlp_std: np.ndarray,
-    ylabel: str,
-    title: str,
-) -> plt.Figure:
-    fig, ax = plt.subplots(figsize=(6.5, 4.0), constrained_layout=True)
-    ax.errorbar(sqrt_betas, null_mean, yerr=null_std, fmt="o-", label=r"MLP$_{\mathrm{null}}$")
-    ax.errorbar(sqrt_betas, mlp_mean, yerr=mlp_std, fmt="o-", label=r"$\mathrm{MLP}$")
-    ax.set_xlabel(r"$\sqrt{\beta}$")
-    ax.set_ylabel(_latex_text(ylabel))
-    ax.set_title(_latex_text(title))
-    ax.grid(True, alpha=0.3)
-    return fig
 
 
 def make_cluster_bar_plot(
