@@ -42,6 +42,7 @@ class RunConfig:
     convergence_drift_tol: float
     convergence_spread_factor: float
     output_frame_limit: int
+    gifs: bool
     experiment_dir: Optional[Path]
 
 
@@ -80,6 +81,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "convergence_drift_tol": 1e-3,
     "convergence_spread_factor": 1.0,
     "output_frame_limit": 400,
+    "gifs": True,
     "experiment_dir": None,
 }
 
@@ -165,6 +167,8 @@ def load_config(path: Path) -> RunConfig:
         raise ValueError("self_attention must be a boolean.")
     if not isinstance(merged["ascending"], bool):
         raise ValueError("ascending must be a boolean.")
+    if not isinstance(merged["gifs"], bool):
+        raise ValueError("gifs must be a boolean.")
 
     mlp_units = merged["mlp_units"] if merged["mlp_units"] is not None else merged["dimension"]
     merged["mlp_scale"] = float(merged["mlp_scale"])
@@ -225,6 +229,7 @@ def load_config(path: Path) -> RunConfig:
         convergence_drift_tol=float(merged["convergence_drift_tol"]),
         convergence_spread_factor=float(merged["convergence_spread_factor"]),
         output_frame_limit=int(merged["output_frame_limit"]),
+        gifs=bool(merged["gifs"]),
         experiment_dir=Path(experiment_dir) if experiment_dir is not None else None,
     )
 

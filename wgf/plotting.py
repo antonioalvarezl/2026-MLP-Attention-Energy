@@ -14,11 +14,24 @@ os.environ.setdefault("MPLCONFIGDIR", str(ROOT / ".matplotlib"))
 (ROOT / ".matplotlib").mkdir(exist_ok=True)
 
 mpl.use("Agg")
+PLOT_DPI = 1200
+BASE_FONT_SIZE = 14
+AXIS_LABEL_SIZE = 18
+TICK_LABEL_SIZE = 16
+TITLE_SIZE = 18
+LEGEND_SIZE = 14
 mpl.rcParams.update(
     {
         "text.usetex": True,
         "font.family": "serif",
         "font.serif": ["Computer Modern Roman"],
+        "font.size": BASE_FONT_SIZE,
+        "axes.labelsize": AXIS_LABEL_SIZE,
+        "axes.titlesize": TITLE_SIZE,
+        "xtick.labelsize": TICK_LABEL_SIZE,
+        "ytick.labelsize": TICK_LABEL_SIZE,
+        "legend.fontsize": LEGEND_SIZE,
+        "savefig.dpi": PLOT_DPI,
     }
 )
 import matplotlib.pyplot as plt
@@ -166,11 +179,12 @@ def plot_trajectories(
     angle_bins: int = 120,
     time_bins: int = 200,
     max_particles: int = 200,
-    time_stride: int = 1,
+    time_stride: int = 5,
     time_scale: str = "linear",
     line_width: float = 0.6,
     line_style: Optional[object] = None,
 ) -> None:
+    # Subsample trajectories but skip density weighting.
     if time_stride < 1:
         time_stride = 1
     times_plot = np.asarray(times, dtype=float)
@@ -185,33 +199,23 @@ def plot_trajectories(
     times_s = times_plot[::time_stride]
     theta_s = theta_hist[::time_stride]
     n_particles = theta_s.shape[1]
+    max_particles = max(1, max_particles)
     step = max(1, n_particles // max_particles)
     particle_idx = np.arange(0, n_particles, step)[:max_particles]
-
-    time_edges, angle_edges, hist = _density_grid(times_plot, theta_hist, angle_bins, time_bins)
-    max_density = float(np.max(hist)) if hist.size else 1.0
-    if max_density <= 0.0:
-        max_density = 1.0
     ref_angle = _circular_mean(theta_hist[-1])
 
     base = np.array(to_rgb(color))
+    line_color = 0.7 * base + 0.3
+    line_alpha = 1.0
     segments = []
-    colors = []
 
     for idx in particle_idx:
         angles = theta_s[:, idx]
         angles_unwrapped = np.unwrap(angles, discont=np.pi)
         angles_unwrapped = _align_unwrapped(angles_unwrapped, ref_angle)
         t_vals = times_s
-        t_idx = np.searchsorted(time_edges, t_vals, side="right") - 1
-        a_idx = np.searchsorted(angle_edges, angles, side="right") - 1
-        t_idx = np.clip(t_idx, 0, hist.shape[0] - 1)
-        a_idx = np.clip(a_idx, 0, hist.shape[1] - 1)
-        densities = hist[t_idx, a_idx]
-        norm = densities / max_density
 
         for k in range(len(angles) - 1):
-            alpha = 0.12 + 0.88 * 0.5 * (norm[k] + norm[k + 1])
             for seg in _split_wrapped_segment(
                 t_vals[k],
                 angles_unwrapped[k],
@@ -219,10 +223,16 @@ def plot_trajectories(
                 angles_unwrapped[k + 1],
             ):
                 segments.append(seg)
-                colors.append((base[0], base[1], base[2], alpha))
 
     if segments:
-        lc = LineCollection(segments, colors=colors, linewidths=line_width)
+        lc = LineCollection(
+            segments,
+            colors=[(line_color[0], line_color[1], line_color[2], line_alpha)],
+            linewidths=line_width,
+            antialiaseds=True,
+        )
+        lc.set_capstyle("round")
+        lc.set_joinstyle("round")
         if line_style is not None:
             lc.set_linestyle(line_style)
         ax.add_collection(lc)
@@ -289,13 +299,16 @@ def plot_circular_histogram(
     bins: int = 120,
     max_bar: float = 0.35,
     color: str = MLP_COLOR,
+    shade_regions: bool = True,
+    bar_alpha: float = 0.85,
 ) -> None:
     ax.set_aspect("equal")
     ax.set_xlim(-1.4, 1.4)
     ax.set_ylim(-1.4, 1.4)
     ax.axis("off")
 
-    _add_region_shading(ax, a)
+    if shade_regions:
+        _add_region_shading(ax, a)
     circle = plt.Circle((0.0, 0.0), 1.0, edgecolor="black", facecolor="none", linewidth=1.0, zorder=3)
     ax.add_patch(circle)
 
@@ -312,10 +325,63 @@ def plot_circular_histogram(
             width=radius - 1.0,
             facecolor=color,
             edgecolor="none",
-            alpha=0.85,
+            alpha=bar_alpha,
             zorder=2,
         )
         ax.add_patch(patch)
+
+
+def plot_overlaid_circular_histograms(
+    ax,
+    thetas: list[np.ndarray],
+    a: np.ndarray,
+    omega: np.ndarray,
+    activation: str,
+    bins: int = 120,
+    max_bar: float = 0.35,
+    color: str = MLP_COLOR,
+    bar_alpha: float = 0.35,
+    shade_regions: bool = True,
+    show_potential: bool = False,
+) -> None:
+    ax.set_aspect("equal")
+    ax.set_xlim(-1.4, 1.4)
+    ax.set_ylim(-1.4, 1.4)
+    ax.axis("off")
+
+    if shade_regions:
+        _add_region_shading(ax, a)
+    circle = plt.Circle((0.0, 0.0), 1.0, edgecolor="black", facecolor="none", linewidth=1.0, zorder=3)
+    ax.add_patch(circle)
+
+    if show_potential and a.size:
+        potential_bins = max(360, bins * 4)
+        theta_grid = np.linspace(0.0, TWO_PI, potential_bins, endpoint=False)
+        potential = mlp_potential(theta_grid, a, omega, activation)
+        _draw_potential_inside(ax, theta_grid, potential)
+
+    edges = np.linspace(0.0, TWO_PI, bins + 1)
+    counts_list = [np.histogram(theta, bins=edges, density=False)[0] for theta in thetas]
+    max_count = 1
+    for counts in counts_list:
+        if counts.size:
+            max_count = max(max_count, int(counts.max()))
+
+    for counts in counts_list:
+        for count, start, end in zip(counts, edges[:-1], edges[1:]):
+            radius = 1.0 + max_bar * (count / max_count)
+            patch = Wedge(
+                (0.0, 0.0),
+                radius,
+                np.degrees(start),
+                np.degrees(end),
+                width=radius - 1.0,
+                facecolor=color,
+                edgecolor="none",
+                alpha=bar_alpha,
+                zorder=2,
+            )
+            ax.add_patch(patch)
 
 
 def plot_histogram_with_potential(
@@ -441,9 +507,9 @@ def make_figure_mlp(
     return fig
 
 
-def save_figure(fig, output_stem: Path, formats: tuple[str, ...] = ("png", "pdf")) -> None:
+def save_figure(fig, output_stem: Path, formats: tuple[str, ...] = ("pdf",)) -> None:
     for fmt in formats:
-        fig.savefig(output_stem.with_suffix(f".{fmt}"), dpi=300)
+        fig.savefig(output_stem.with_suffix(f".{fmt}"), dpi=PLOT_DPI)
 
 
 def make_cluster_stats_plot(
@@ -476,7 +542,7 @@ def make_cluster_bar_plot(
         ax.set_xlim(float(sqrt_betas[0]) - 0.5, float(sqrt_betas[0]) + 0.5)
     else:
         diffs = np.diff(np.sort(sqrt_betas))
-        width = 0.8 * float(np.min(diffs)) if diffs.size else 0.6
+        width = 0.9 * float(np.min(diffs)) if diffs.size else 0.7
         ax.bar(
             sqrt_betas,
             mlp_mean,
@@ -508,7 +574,7 @@ def make_cluster_bar_plot_with_null(
         null_vals = null_mean[order]
         mlp_vals = mlp_mean[order]
         diffs = np.diff(xs)
-        base_width = 0.6 if diffs.size == 0 else 0.8 * float(np.min(diffs))
+        base_width = 0.7 if diffs.size == 0 else 0.9 * float(np.min(diffs))
         width = base_width / 2.0
         ax.bar(xs - width / 2.0, null_vals, width=width, color=NULL_COLOR, alpha=0.9)
         ax.bar(xs + width / 2.0, mlp_vals, width=width, color=MLP_COLOR, alpha=0.9)
@@ -612,7 +678,12 @@ def _draw_potential_inside(
     if np.allclose(potential, 0.0):
         return
     step = TWO_PI / float(theta.size)
-    depths = depth_scale * np.abs(potential)
+    abs_potential = np.abs(potential)
+    max_abs = float(np.max(abs_potential))
+    if max_abs <= 0.0:
+        return
+    scale = max_abs / max(depth_scale, 1e-12)
+    depths = radius * (1.0 - np.exp(-abs_potential / scale))
     for ang, depth, value in zip(theta, depths, potential):
         inner = max(0.0, radius - depth)
         if inner >= radius:
@@ -779,6 +850,35 @@ def make_histogram_comparison_frame(
     fig.suptitle(
         rf"$\mathrm{{{attention_label}}},\ t={time_value:.3f},\ \beta={beta:g},\ "
         rf"N={n_particles}$"
+    )
+    return fig
+
+
+def make_total_clusters_figure(
+    thetas: list[np.ndarray],
+    a: np.ndarray,
+    omega: np.ndarray,
+    activation: str,
+    color: str,
+    bins: int = 120,
+    max_bar: float = 0.35,
+    bar_alpha: float = 0.35,
+    shade_regions: bool = True,
+    show_potential: bool = False,
+) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(5.5, 5.5))
+    plot_overlaid_circular_histograms(
+        ax,
+        thetas,
+        a,
+        omega,
+        activation,
+        bins=bins,
+        max_bar=max_bar,
+        color=color,
+        bar_alpha=bar_alpha,
+        shade_regions=shade_regions,
+        show_potential=show_potential,
     )
     return fig
 

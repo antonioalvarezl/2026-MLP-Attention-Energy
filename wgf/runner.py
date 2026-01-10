@@ -44,6 +44,7 @@ from .plotting import (
     make_field_frame,
     make_histogram_comparison_frame,
     make_histogram_frame,
+    make_total_clusters_figure,
     mlp_potential,
     save_figure,
 )
@@ -140,6 +141,7 @@ def _build_params_dict(
         "self_attention": config.self_attention,
         "ascending": config.ascending,
         "output_frame_limit": config.output_frame_limit,
+        "gifs": config.gifs,
     }
 
 
@@ -237,7 +239,7 @@ def _save_frames_and_gif(
     if not frame_indices:
         return
 
-    skip_gif = len(frame_indices) > output_frame_limit
+    skip_gif = len(frame_indices) > output_frame_limit or not save_gif
     frames_dir = run_dir / f"frames_{label_slug}"
     frames_dir.mkdir(parents=True, exist_ok=True)
 
@@ -266,8 +268,9 @@ def _save_frames_and_gif(
         frame_iter = iter_progress(range(len(frame_indices)), label=f"Frames {label_slug}", unit="frame")
     gif_images = []
 
-    import io
-    from PIL import Image
+    if not skip_gif:
+        import io
+        from PIL import Image
 
     for frame_pos in frame_iter:
         if skip_gif:
@@ -289,7 +292,7 @@ def _save_frames_and_gif(
             color=color,
         )
         if frame_pos in frame_labels:
-            frame_path = frames_dir / f"frame_{frame_labels[frame_pos]}.png"
+            frame_path = frames_dir / f"frame_{frame_labels[frame_pos]}.pdf"
             frame_fig.savefig(frame_path, dpi=150)
 
         if not skip_gif:
@@ -629,6 +632,7 @@ def run_experiment(config: RunConfig) -> None:
     print(f"  self_attention={config.self_attention}")
     print(f"  ascending={config.ascending}")
     print(f"  output_frame_limit={config.output_frame_limit}")
+    print(f"  gifs={config.gifs}")
 
     seed_plan = build_seed_plan(config)
     if num_steps <= 0:
@@ -765,6 +769,22 @@ def run_experiment(config: RunConfig) -> None:
             mlp_params_list.append(sample_mlp_params(rng_mlp, mlp_config))
 
         print("Writing outputs...")
+        if config.num_point_inits > 1:
+            beta_label = f"{beta:.6g}"
+            null_final = [hist[-1] for hist in null_histories]
+            fig = make_total_clusters_figure(
+                null_final,
+                a=np.empty((0, 2)),
+                omega=np.empty((0, 2)),
+                activation=config.activation,
+                color=NULL_COLOR,
+                shade_regions=True,
+                show_potential=False,
+            )
+            save_figure(fig, run_dir / f"total_clusters_beta={beta_label}_null", formats=("pdf",))
+            import matplotlib.pyplot as plt
+
+            plt.close(fig)
 
         null_counts = []
         null_mode_counts = []
@@ -786,7 +806,7 @@ def run_experiment(config: RunConfig) -> None:
                 color=NULL_COLOR,
                 plot_interval=config.plot_interval,
                 output_frame_limit=config.output_frame_limit,
-                save_gif=True,
+                save_gif=config.gifs,
             )
             if is_infinite:
                 conv_idx = len(theta_hist) - 1
@@ -886,44 +906,46 @@ def run_experiment(config: RunConfig) -> None:
                     color=MLP_COLOR,
                     plot_interval=config.plot_interval,
                     output_frame_limit=config.output_frame_limit,
+                    save_gif=config.gifs,
                 )
                 if config.num_mlp_inits == 1 and config.num_point_inits == 1:
                     comparison_path = run_dir / "evolution_MLP_comparison.gif"
                 else:
                     comparison_path = run_dir / f"evolution_MLP_comparison_{label_slug}.gif"
-                _save_comparison_gif(
-                    comparison_path,
-                    null_histories[j],
-                    null_times[j],
-                    theta_hist,
-                    times,
-                    beta,
-                    config.n_particles,
-                    mlp_std_label,
-                    attention_label,
-                    a=mlp_params.a,
-                    omega=mlp_params.omega,
-                    activation=mlp_params.activation,
-                    plot_interval=config.plot_interval,
-                    output_frame_limit=config.output_frame_limit,
-                )
-                _save_field_gif(
-                    run_dir,
-                    label_slug,
-                    theta_hist,
-                    times,
-                    beta,
-                    config.n_particles,
-                    mlp_title,
-                    attention_label,
-                    config.attention_mode,
-                    config.ascending,
-                    a=mlp_params.a,
-                    omega=mlp_params.omega,
-                    activation=mlp_params.activation,
-                    plot_interval=config.plot_interval,
-                    output_frame_limit=config.output_frame_limit,
-                )
+                if config.gifs:
+                    _save_comparison_gif(
+                        comparison_path,
+                        null_histories[j],
+                        null_times[j],
+                        theta_hist,
+                        times,
+                        beta,
+                        config.n_particles,
+                        mlp_std_label,
+                        attention_label,
+                        a=mlp_params.a,
+                        omega=mlp_params.omega,
+                        activation=mlp_params.activation,
+                        plot_interval=config.plot_interval,
+                        output_frame_limit=config.output_frame_limit,
+                    )
+                    _save_field_gif(
+                        run_dir,
+                        label_slug,
+                        theta_hist,
+                        times,
+                        beta,
+                        config.n_particles,
+                        mlp_title,
+                        attention_label,
+                        config.attention_mode,
+                        config.ascending,
+                        a=mlp_params.a,
+                        omega=mlp_params.omega,
+                        activation=mlp_params.activation,
+                        plot_interval=config.plot_interval,
+                        output_frame_limit=config.output_frame_limit,
+                    )
                 if config.num_mlp_inits == 1 and config.num_point_inits == 1:
                     convergence_path = run_dir / "convergence"
                 else:
@@ -936,7 +958,7 @@ def run_experiment(config: RunConfig) -> None:
                     k_limit=config.k_max,
                     color=MLP_COLOR,
                 )
-                save_figure(fig, convergence_path, formats=("png",))
+                save_figure(fig, convergence_path, formats=("pdf",))
                 import matplotlib.pyplot as plt
 
                 plt.close(fig)
@@ -950,7 +972,7 @@ def run_experiment(config: RunConfig) -> None:
                     time_scale="log",
                 )
                 log_path = convergence_path.with_name(f"{convergence_path.name}_log")
-                save_figure(fig, log_path, formats=("png",))
+                save_figure(fig, log_path, formats=("pdf",))
                 plt.close(fig)
                 if is_infinite:
                     conv_idx = len(theta_hist) - 1
@@ -961,6 +983,24 @@ def run_experiment(config: RunConfig) -> None:
                 mlp_mass_counts.append(
                     mass_count(theta_hist[conv_idx], threshold, config.mass_threshold)
                 )
+
+            if config.num_point_inits > 1:
+                beta_label = f"{beta:.6g}"
+                suffix = f"_MLP{i + 1}" if config.num_mlp_inits > 1 else ""
+                mlp_final = [hist[-1] for hist in mlp_histories]
+                fig = make_total_clusters_figure(
+                    mlp_final,
+                    a=mlp_params.a,
+                    omega=mlp_params.omega,
+                    activation=mlp_params.activation,
+                    color=MLP_COLOR,
+                    shade_regions=False,
+                    show_potential=True,
+                )
+                save_figure(fig, run_dir / f"total_clusters_beta={beta_label}{suffix}", formats=("pdf",))
+                import matplotlib.pyplot as plt
+
+                plt.close(fig)
 
             row_labels = [f"init {j + 1}" for j in range(config.num_point_inits)]
             null_plot_title = rf"$\mathrm{{MLP}}\,=\,0\ (k_{{\mathrm{{max}}}}={k_max})$"
@@ -979,7 +1019,7 @@ def run_experiment(config: RunConfig) -> None:
                 null_title=null_plot_title,
                 mlp_title=mlp_plot_title,
             )
-            save_figure(fig, run_dir / f"figure_MLP{i + 1}", formats=("png",))
+            save_figure(fig, run_dir / f"figure_MLP{i + 1}", formats=("pdf",))
             import matplotlib.pyplot as plt
 
             plt.close(fig)
@@ -998,7 +1038,7 @@ def run_experiment(config: RunConfig) -> None:
                 null_title=null_plot_title,
                 mlp_title=mlp_plot_title,
             )
-            save_figure(fig, run_dir / f"figure_MLP{i + 1}_log", formats=("png",))
+            save_figure(fig, run_dir / f"figure_MLP{i + 1}_log", formats=("pdf",))
             plt.close(fig)
 
         actual_num_steps = max(all_steps) if (is_infinite and all_steps) else None
@@ -1064,7 +1104,7 @@ def run_experiment(config: RunConfig) -> None:
             mlp_mean,
             ylabel="cluster count",
         )
-        save_figure(fig, stats_dir / "cluster_count", formats=("png",))
+        save_figure(fig, stats_dir / "cluster_count", formats=("pdf",))
         import matplotlib.pyplot as plt
 
         plt.close(fig)
@@ -1074,7 +1114,7 @@ def run_experiment(config: RunConfig) -> None:
             mlp_mean,
             ylabel="cluster count",
         )
-        save_figure(fig, stats_dir / "cluster_count_with_null", formats=("png",))
+        save_figure(fig, stats_dir / "cluster_count_with_null", formats=("pdf",))
         plt.close(fig)
 
         null_mean, _ = _stats(null_mode_counts)
@@ -1084,7 +1124,7 @@ def run_experiment(config: RunConfig) -> None:
             mlp_mean,
             ylabel="mode count",
         )
-        save_figure(fig, stats_dir / "mode_count", formats=("png",))
+        save_figure(fig, stats_dir / "mode_count", formats=("pdf",))
         plt.close(fig)
         fig = make_cluster_bar_plot_with_null(
             sqrt_betas,
@@ -1092,7 +1132,7 @@ def run_experiment(config: RunConfig) -> None:
             mlp_mean,
             ylabel="mode count",
         )
-        save_figure(fig, stats_dir / "mode_count_with_null", formats=("png",))
+        save_figure(fig, stats_dir / "mode_count_with_null", formats=("pdf",))
         plt.close(fig)
 
         null_mean, _ = _stats(null_mass_counts)
@@ -1102,7 +1142,7 @@ def run_experiment(config: RunConfig) -> None:
             mlp_mean,
             ylabel="mass count",
         )
-        save_figure(fig, stats_dir / "mass_count", formats=("png",))
+        save_figure(fig, stats_dir / "mass_count", formats=("pdf",))
         plt.close(fig)
         fig = make_cluster_bar_plot_with_null(
             sqrt_betas,
@@ -1110,7 +1150,7 @@ def run_experiment(config: RunConfig) -> None:
             mlp_mean,
             ylabel="mass count",
         )
-        save_figure(fig, stats_dir / "mass_count_with_null", formats=("png",))
+        save_figure(fig, stats_dir / "mass_count_with_null", formats=("pdf",))
         plt.close(fig)
 
 
