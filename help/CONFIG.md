@@ -25,8 +25,15 @@ defaults live in `wgf/config.py` under `DEFAULT_CONFIG`.
 
 - mlp_units: int > 0 or `null`; `null` uses `dimension`.
 - activation: `"relu"` or `"gelu"` (required).
-- mlp_scale: float; scale of MLP weights (std).
-- gradient_MLP: bool; must be `true` (the MLP is constrained to be a gradient field).
+- mlp_scale: float or list of floats; scale of MLP weights. If a list is
+  provided, `betas` must contain a single value and each scale is run
+  separately. If the list has three numbers `[start, stop, step]`, a range is
+  generated from start to stop using the step size.
+- mlp_scale_mode: `"std"` or `"norm"`; `"std"` treats `mlp_scale` as the
+  standard deviation of the MLP weight scalars, `"norm"` fixes `|omega_j|`
+  to `mlp_scale` with a random sign.
+- gradient_MLP: bool; if `false`, the MLP is not constrained to be a gradient field
+  and potential overlays are skipped in plots.
 - num_mlp_inits: int > 0; number of independent MLP draws per beta.
 
 ## Initializations and seeds
@@ -59,3 +66,5 @@ defaults live in `wgf/config.py` under `DEFAULT_CONFIG`.
 - plot_interval: float > 0; time spacing for GIF frames.
 - output_frame_limit: int > 0; if exceeded, GIFs are skipped but
   `frame_first/middle/last` are still saved.
+- when `mlp_scale` is a list, a `mlp_scale_sweep.json` file is written at the
+  experiment root with per-scale summaries.
