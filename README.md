@@ -14,10 +14,10 @@ unnormalized self-attention (USA) and normalized self-attention (SA).
 
 **Unnormalized self-attention + Gradient Descent**
 
-![Demo](examples/USA_d.gif)
+![Demo](examples/USAd.gif)
 
 **Normalized self-attention + Gradient Descent**
-![Demo](examples/SA_d.gif)
+![Demo](examples/SAd.gif)
 
 ## Quick start
 
