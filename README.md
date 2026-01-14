@@ -4,12 +4,20 @@ This repo simulates transformer-style dynamics (self-attention + MLP) on the uni
 circle $\\mathbb{S}^1$, interpreted as a gradient flow. Two variants are supported:
 unnormalized self-attention (USA) and normalized self-attention (SA).
 
-**Unnormalized self-attention**
+
+**Unnormalized self-attention + Gradient Ascent**
 
 ![Demo](examples/USA.gif)
 
-**Normalized self-attention**
+**Normalized self-attention + Gradient Ascent**
 ![Demo](examples/SA.gif)
+
+**Unnormalized self-attention + Gradient Descent**
+
+![Demo](examples/USA_d.gif)
+
+**Normalized self-attention + Gradient Descent**
+![Demo](examples/SA_d.gif)
 
 ## Quick start
 
