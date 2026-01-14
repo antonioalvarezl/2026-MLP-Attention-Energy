@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime
+import time
 import json
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, Optional
@@ -36,15 +37,18 @@ from .io import canonical_json, find_matching_run, make_run_dir, save_gif_from_i
 from .plotting import (
     MLP_COLOR,
     NULL_COLOR,
+    SA_COLOR,
     gamma_k_s1,
     make_cluster_bar_plot,
     make_cluster_bar_plot_with_null,
-    make_convergence_figure,
-    make_figure_mlp,
     make_field_frame,
+    make_gamma_figure,
     make_histogram_comparison_frame,
+    make_histogram_figure,
     make_histogram_frame,
+    make_mlp_scale_stop_time_figure,
     make_total_clusters_figure,
+    make_trajectory_figure,
     mlp_potential,
     save_figure,
 )
@@ -91,10 +95,14 @@ def _build_params_dict(
     seeds: SeedPlan,
     num_steps: int,
     effective_total_time: Optional[float],
+    mlp_scale: Optional[float] = None,
+    mlp_scale_mode: Optional[str] = None,
     actual_num_steps: Optional[int] = None,
     actual_total_time: Optional[float] = None,
     actual_mlp_scale: Optional[float] = None,
 ) -> dict:
+    scale_value = config.mlp_scale if mlp_scale is None else mlp_scale
+    scale_mode_value = config.mlp_scale_mode if mlp_scale_mode is None else mlp_scale_mode
     if np.isinf(config.total_time):
         total_time_value = "inf"
         num_steps_value = None
@@ -121,7 +129,8 @@ def _build_params_dict(
         "k_max": config.k_max,
         "num_mlp_inits": config.num_mlp_inits,
         "mlp_units": config.mlp_units,
-        "mlp_scale": config.mlp_scale,
+        "mlp_scale": scale_value,
+        "mlp_scale_mode": scale_mode_value,
         "actual_mlp_scale": actual_mlp_scale,
         "activation": config.activation,
         "gradient_MLP": config.gradient_mlp,
@@ -161,6 +170,18 @@ def _frame_indices(times: np.ndarray, interval: float) -> tuple[list[int], list[
         unique_indices.append(idx)
         unique_times.append(float(times[idx]))
     return unique_indices, unique_times
+
+
+def _histogram_density(theta: np.ndarray, edges: np.ndarray) -> list[float]:
+    counts, _ = np.histogram(theta, bins=edges, density=True)
+    return counts.astype(float).tolist()
+
+
+def _stop_time(cluster_times: list[Optional[float]]) -> float:
+    if not cluster_times:
+        return 0.0
+    values = [0.0 if t is None else float(t) for t in cluster_times]
+    return float(np.mean(values))
 
 
 def _simulate_until_convergence(
@@ -233,6 +254,7 @@ def _save_frames_and_gif(
     color: str,
     plot_interval: float,
     output_frame_limit: int,
+    show_potential: bool = True,
     save_gif: bool = True,
 ) -> None:
     frame_indices, frame_times = _frame_indices(times, plot_interval)
@@ -279,6 +301,7 @@ def _save_frames_and_gif(
         else:
             time_idx = frame_indices[frame_pos]
             frame_time = frame_times[frame_pos]
+        shade_regions = True
         frame_fig = make_histogram_frame(
             theta_hist[time_idx],
             frame_time,
@@ -290,11 +313,9 @@ def _save_frames_and_gif(
             omega=omega,
             activation=activation,
             color=color,
+            shade_regions=shade_regions,
+            show_potential=show_potential,
         )
-        if frame_pos in frame_labels:
-            frame_path = frames_dir / f"frame_{frame_labels[frame_pos]}.pdf"
-            frame_fig.savefig(frame_path, dpi=150)
-
         if not skip_gif:
             buf = io.BytesIO()
             frame_fig.savefig(buf, format="png", dpi=120)
@@ -304,6 +325,38 @@ def _save_frames_and_gif(
             img.close()
             buf.close()
         import matplotlib.pyplot as plt
+
+        if frame_pos in frame_labels:
+            label = frame_labels[frame_pos]
+            if frame_fig.axes:
+                for ax in frame_fig.axes:
+                    ax.set_title("")
+            frame_path = frames_dir / f"frame_{label}.pdf"
+            frame_fig.savefig(frame_path, dpi=150)
+
+            if a.size:
+                alt_shade = not shade_regions
+                alt_fig = make_histogram_frame(
+                    theta_hist[time_idx],
+                    frame_time,
+                    beta,
+                    n_particles,
+                    mlp_title,
+                    attention_label,
+                    a=a,
+                    omega=omega,
+                    activation=activation,
+                    color=color,
+                    shade_regions=alt_shade,
+                    show_potential=show_potential,
+                )
+                if alt_fig.axes:
+                    for ax in alt_fig.axes:
+                        ax.set_title("")
+                suffix = "shaded" if alt_shade else "noshade"
+                alt_path = frames_dir / f"frame_{label}_{suffix}.pdf"
+                alt_fig.savefig(alt_path, dpi=150)
+                plt.close(alt_fig)
 
         plt.close(frame_fig)
 
@@ -342,6 +395,7 @@ def _save_field_gif(
     activation: str,
     plot_interval: float,
     output_frame_limit: int,
+    show_potential: bool = True,
     grid_points: int = 256,
 ) -> None:
     frame_indices, frame_times = _frame_indices(times, plot_interval)
@@ -356,7 +410,9 @@ def _save_field_gif(
 
     theta_grid = np.linspace(0.0, TWO_PI, grid_points, endpoint=False)
     params = MLPParams(a=a, omega=omega, activation=activation)
-    potential = mlp_potential(theta_grid, a, omega, activation)
+    potential = None
+    if show_potential:
+        potential = mlp_potential(theta_grid, a, omega, activation)
 
     fields = []
     att_fields = []
@@ -473,6 +529,8 @@ def _save_comparison_gif(
     activation: str,
     plot_interval: float,
     output_frame_limit: int,
+    show_potential: bool = True,
+    mlp_color: str = MLP_COLOR,
 ) -> None:
     null_indices, mlp_indices, frame_times = _common_frame_indices(
         null_times, mlp_times, plot_interval
@@ -507,6 +565,8 @@ def _save_comparison_gif(
             a=a,
             omega=omega,
             activation=activation,
+            show_potential=show_potential,
+            mlp_color=mlp_color,
         )
         buf = io.BytesIO()
         fig.savefig(buf, format="png", dpi=120)
@@ -539,8 +599,18 @@ def _write_run_summary(
     mlp_mode_counts: list[int],
     null_mass_counts: list[int],
     mlp_mass_counts: list[int],
+    null_stop_reasons: list[str],
+    mlp_stop_reasons: list[str],
     num_mlp_inits: int,
     num_point_inits: int,
+    runtime_seconds: float,
+    mlp_scale: float,
+    mlp_scale_mode: str,
+    null_cluster_times: list[Optional[float]],
+    mlp_cluster_times: list[Optional[float]],
+    histogram_edges: list[float],
+    null_histogram_densities: list[list[float]],
+    mlp_histogram_densities: list[list[float]],
 ) -> None:
     summary = {
         "beta": beta,
@@ -552,8 +622,18 @@ def _write_run_summary(
         "mlp_mode_counts": mlp_mode_counts,
         "null_mass_counts": null_mass_counts,
         "mlp_mass_counts": mlp_mass_counts,
+        "null_stop_reasons": null_stop_reasons,
+        "mlp_stop_reasons": mlp_stop_reasons,
         "num_mlp_inits": num_mlp_inits,
         "num_point_inits": num_point_inits,
+        "runtime_seconds": runtime_seconds,
+        "mlp_scale": mlp_scale,
+        "mlp_scale_mode": mlp_scale_mode,
+        "null_cluster_times": null_cluster_times,
+        "mlp_cluster_times": mlp_cluster_times,
+        "histogram_edges": histogram_edges,
+        "null_histogram_densities": null_histogram_densities,
+        "mlp_histogram_densities": mlp_histogram_densities,
     }
     write_json(run_dir / "summary.json", summary, compact=False)
 
@@ -597,6 +677,30 @@ def _load_run_summaries(
     return ordered
 
 
+def _load_scale_summaries(
+    experiment_dir: Path,
+    expected_params: dict[float, str],
+) -> list[tuple[float, dict, Path]]:
+    if not experiment_dir.exists():
+        return []
+    expected_by_params = {params_json: scale for scale, params_json in expected_params.items()}
+    entries: list[tuple[float, dict, Path]] = []
+    for summary_path in experiment_dir.rglob("summary.json"):
+        try:
+            data = json.loads(summary_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        params_json = data.get("params_json")
+        if params_json is None:
+            continue
+        scale = expected_by_params.get(params_json)
+        if scale is None:
+            continue
+        entries.append((scale, data, summary_path.parent))
+    entries.sort(key=lambda item: item[0])
+    return entries
+
+
 def run_experiment(config: RunConfig) -> None:
     is_infinite = np.isinf(config.total_time)
     if is_infinite:
@@ -618,7 +722,8 @@ def run_experiment(config: RunConfig) -> None:
     print(f"  integrator={config.integrator}")
     print(f"  activation={config.activation}")
     print(f"  mlp_units={config.mlp_units}")
-    print(f"  mlp_scale={config.mlp_scale}")
+    print(f"  mlp_scale={config.mlp_scales}")
+    print(f"  mlp_scale_mode={config.mlp_scale_mode}")
     print(f"  num_mlp_inits={config.num_mlp_inits}")
     print(f"  num_point_inits={config.num_point_inits}")
     print(f"  particle_seed={config.particle_seed}")
@@ -640,7 +745,6 @@ def run_experiment(config: RunConfig) -> None:
 
     effective_total_time = None if is_infinite else num_steps * config.dt
     progress_every = progress_interval(num_steps)
-
     experiment_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if config.experiment_dir is None:
         experiment_dir = config.results_dir / f"experiment_{experiment_stamp}"
@@ -651,22 +755,50 @@ def run_experiment(config: RunConfig) -> None:
             if experiment_dir.parent == Path("."):
                 experiment_dir = config.results_dir / experiment_dir
         experiment_dir.mkdir(parents=True, exist_ok=True)
+
     expected_params: dict[float, str] = {}
+    mlp_scales = config.mlp_scales
+    multi_scale = len(mlp_scales) > 1
+    histogram_bins = 80
+    histogram_edges = np.linspace(0.0, TWO_PI, histogram_bins + 1)
+    sweep_beta: Optional[float] = None
+    sweep_expected_params: dict[float, str] = {}
 
     for beta in config.betas:
         print(f"Starting beta={beta}")
         seeds = seed_plan[beta]
-        params = _build_params_dict(config, beta, seeds, num_steps, effective_total_time)
-        params_json = canonical_json(params)
-        expected_params[beta] = params_json
 
-        existing = find_matching_run(experiment_dir, params_json)
-        if existing is not None:
-            print(f"Skipping beta={beta}: params already exist at {existing}")
+        scale_runs: list[tuple[float, str]] = []
+        expected_scale_params: dict[float, str] = {}
+        for mlp_scale in mlp_scales:
+            params = _build_params_dict(
+                config,
+                beta,
+                seeds,
+                num_steps,
+                effective_total_time,
+                mlp_scale=mlp_scale,
+                mlp_scale_mode=config.mlp_scale_mode,
+            )
+            params_json = canonical_json(params)
+            expected_scale_params[mlp_scale] = params_json
+            if not multi_scale:
+                expected_params[beta] = params_json
+
+            existing = find_matching_run(experiment_dir, params_json)
+            if existing is not None:
+                print(
+                    f"Skipping beta={beta}, mlp_scale={mlp_scale}: params already exist at {existing}"
+                )
+                continue
+            scale_runs.append((mlp_scale, params_json))
+
+        if multi_scale:
+            sweep_beta = beta
+            sweep_expected_params = expected_scale_params
+
+        if not scale_runs:
             continue
-
-        run_dir = make_run_dir(experiment_dir, beta, params_json)
-        print(f"Run directory: {run_dir}")
 
         sim_config = SimulationConfig(
             beta=beta,
@@ -678,19 +810,9 @@ def run_experiment(config: RunConfig) -> None:
             ascending=config.ascending,
             integrator=config.integrator,
         )
-        mlp_scale_eff = float(config.mlp_scale)
-        mlp_std_label = f"{mlp_scale_eff:.3g}"
-        mlp_title = rf"\mathrm{{std(MLP)}}\,=\,{mlp_std_label}"
         mlp_null_title = r"\mathrm{MLP}\,=\,0"
         attention_label = "USA" if config.attention_mode == "unnormalized" else "SA"
-        mlp_config = MLPConfig(
-            n_units=config.mlp_units,
-            activation=config.activation,
-            weight_scale=mlp_scale_eff,
-            gradient_mlp=config.gradient_mlp,
-        )
-        all_steps: list[int] = []
-        did_not_converge = False
+        mlp_color = MLP_COLOR if config.attention_mode == "unnormalized" else SA_COLOR
 
         theta0_list = []
         for seed in seeds.particle_seeds:
@@ -702,6 +824,9 @@ def run_experiment(config: RunConfig) -> None:
         null_histories = []
         null_times = []
         null_steps = []
+        null_stop_reasons = []
+        null_cluster_times: list[Optional[float]] = []
+        null_did_not_converge = False
         for idx, theta0 in enumerate(theta0_list):
             label = f"beta={beta} MLP_null init {idx + 1}/{config.num_point_inits}"
             bar = ProgressHandle(num_steps, label=label)
@@ -719,7 +844,8 @@ def run_experiment(config: RunConfig) -> None:
                     progress_every=progress_every,
                 )
                 if not converged:
-                    did_not_converge = True
+                    null_did_not_converge = True
+                stop_reason = "convergence" if converged else "max_steps"
             else:
                 times, theta_hist = simulate(
                     theta0,
@@ -729,11 +855,16 @@ def run_experiment(config: RunConfig) -> None:
                     progress_every=progress_every,
                 )
                 step_count = num_steps
+                stop_reason = "fixed_time"
             bar.close()
             null_histories.append(theta_hist)
             null_times.append(times)
             null_steps.append(step_count)
-            all_steps.append(step_count)
+            null_stop_reasons.append(stop_reason)
+            null_cluster_times.append(
+                step_count * config.dt if stop_reason == "convergence" else None
+            )
+            print(f"  [null init {idx + 1}] stop_reason={stop_reason}")
             att0 = attention_drift_particles(
                 theta_hist[0],
                 beta,
@@ -759,319 +890,426 @@ def run_experiment(config: RunConfig) -> None:
                 f"max|total|={max_att_end:.6e}"
             )
 
-        k_candidates = np.arange(0, config.k_max + 1)
-        gamma_vals = gamma_k_s1(beta, k_candidates)
-        k_max = int(k_candidates[np.argmax(gamma_vals)]) if k_candidates.size else 0
+        null_histogram_densities = [
+            _histogram_density(hist[-1], histogram_edges) for hist in null_histories
+        ]
 
-        mlp_params_list = []
-        for mlp_seed in seeds.mlp_seeds:
-            rng_mlp = np.random.default_rng(mlp_seed)
-            mlp_params_list.append(sample_mlp_params(rng_mlp, mlp_config))
+        for mlp_scale_eff, params_json in scale_runs:
+            run_dir = make_run_dir(experiment_dir, beta, params_json)
+            print(f"Run directory: {run_dir}")
+            run_start = time.perf_counter()
+            did_not_converge = null_did_not_converge
+            all_steps: list[int] = list(null_steps)
 
-        print("Writing outputs...")
-        if config.num_point_inits > 1:
-            beta_label = f"{beta:.6g}"
-            null_final = [hist[-1] for hist in null_histories]
-            fig = make_total_clusters_figure(
-                null_final,
-                a=np.empty((0, 2)),
-                omega=np.empty((0, 2)),
+            mlp_std_label = f"{mlp_scale_eff:.3g}"
+            if config.mlp_scale_mode == "norm":
+                mlp_title = rf"\|\omega\|\,=\,{mlp_std_label}"
+            else:
+                mlp_title = rf"\mathrm{{std(MLP)}}\,=\,{mlp_std_label}"
+
+            mlp_config = MLPConfig(
+                n_units=config.mlp_units,
                 activation=config.activation,
-                color=NULL_COLOR,
-                shade_regions=True,
-                show_potential=False,
+                weight_scale=mlp_scale_eff,
+                weight_scale_mode=config.mlp_scale_mode,
+                gradient_mlp=config.gradient_mlp,
             )
-            save_figure(fig, run_dir / f"total_clusters_beta={beta_label}_null", formats=("pdf",))
+
+            k_candidates = np.arange(0, config.k_max + 1)
+            gamma_vals = gamma_k_s1(beta, k_candidates)
+            k_max = int(k_candidates[np.argmax(gamma_vals)]) if k_candidates.size else 0
+            fig = make_gamma_figure(beta, config.k_max, k_max)
+            save_figure(fig, run_dir / "gamma_k", formats=("pdf",))
             import matplotlib.pyplot as plt
 
             plt.close(fig)
 
-        null_counts = []
-        null_mode_counts = []
-        null_mass_counts = []
-        for j, theta_hist in enumerate(null_histories):
-            label_slug = f"MLP_null_init{j + 1}"
-            _save_frames_and_gif(
-                run_dir,
-                label_slug,
-                theta_hist,
-                null_times[j],
-                beta,
-                config.n_particles,
-                mlp_null_title,
-                attention_label,
-                a=np.empty((0, 2)),
-                omega=np.empty((0, 2)),
-                activation=config.activation,
-                color=NULL_COLOR,
-                plot_interval=config.plot_interval,
-                output_frame_limit=config.output_frame_limit,
-                save_gif=config.gifs,
-            )
-            if is_infinite:
-                conv_idx = len(theta_hist) - 1
-            else:
-                conv_idx = convergence_index(theta_hist, threshold, config.convergence_window)
-            null_counts.append(cluster_count(theta_hist[conv_idx], threshold))
-            null_mode_counts.append(mode_count(theta_hist[conv_idx], threshold))
-            null_mass_counts.append(
-                mass_count(theta_hist[conv_idx], threshold, config.mass_threshold)
-            )
+            mlp_params_list = []
+            for mlp_seed in seeds.mlp_seeds:
+                rng_mlp = np.random.default_rng(mlp_seed)
+                mlp_params_list.append(sample_mlp_params(rng_mlp, mlp_config))
 
-        mlp_counts = []
-        mlp_mode_counts = []
-        mlp_mass_counts = []
-        for i, mlp_params in enumerate(mlp_params_list):
-            mlp_histories = []
-            mlp_times = []
-            mlp_steps = []
-            for j, theta0 in enumerate(theta0_list):
-                label = f"beta={beta} MLP{i + 1} init {j + 1}/{config.num_point_inits}"
-                bar = ProgressHandle(num_steps, label=label)
-                if is_infinite:
-                    times, theta_hist, step_count, converged = _simulate_until_convergence(
-                        theta0,
-                        sim_config,
-                        mlp_params,
-                        threshold,
-                        config.convergence_window,
-                        config.max_steps,
-                        config.convergence_drift_tol,
-                        config.convergence_spread_factor,
-                        progress=bar.update_to,
-                        progress_every=progress_every,
-                    )
-                    if not converged:
-                        did_not_converge = True
-                else:
-                    times, theta_hist = simulate(
-                        theta0,
-                        sim_config,
-                        mlp_params,
-                        progress=bar.update_to,
-                        progress_every=progress_every,
-                    )
-                    step_count = num_steps
-                bar.close()
-                mlp_histories.append(theta_hist)
-                mlp_times.append(times)
-                mlp_steps.append(step_count)
-                all_steps.append(step_count)
-                att0 = attention_drift_particles(
-                    theta_hist[0],
-                    beta,
-                    config.attention_mode,
-                    self_attention=config.self_attention,
-                    ascending=config.ascending,
+            print("Writing outputs...")
+            if config.num_point_inits > 1:
+                beta_label = f"{beta:.6g}"
+                null_final = [hist[-1] for hist in null_histories]
+                fig = make_total_clusters_figure(
+                    null_final,
+                    a=np.empty((0, 2)),
+                    omega=np.empty((0, 2)),
+                    activation=config.activation,
+                    color=NULL_COLOR,
+                    shade_regions=True,
+                    show_potential=False,
                 )
-                mlp0 = mlp_drift(theta_hist[0], mlp_params)
-                total0 = att0 + mlp0
-                att_end = attention_drift_particles(
-                    theta_hist[-1],
-                    beta,
-                    config.attention_mode,
-                    self_attention=config.self_attention,
-                    ascending=config.ascending,
-                )
-                mlp_end = mlp_drift(theta_hist[-1], mlp_params)
-                total_end = att_end + mlp_end
-                max_att0 = float(np.max(np.abs(att0))) if att0.size else 0.0
-                max_mlp0 = float(np.max(np.abs(mlp0))) if mlp0.size else 0.0
-                max_total0 = float(np.max(np.abs(total0))) if total0.size else 0.0
-                max_att_end = float(np.max(np.abs(att_end))) if att_end.size else 0.0
-                max_mlp_end = float(np.max(np.abs(mlp_end))) if mlp_end.size else 0.0
-                max_total_end = float(np.max(np.abs(total_end))) if total_end.size else 0.0
-                print(
-                    f"  [MLP {i + 1} init {j + 1}] t=0 max|att|={max_att0:.6e} "
-                    f"max|mlp|={max_mlp0:.6e} max|total|={max_total0:.6e}"
-                )
-                print(
-                    f"  [MLP {i + 1} init {j + 1}] t=end max|att|={max_att_end:.6e} "
-                    f"max|mlp|={max_mlp_end:.6e} max|total|={max_total_end:.6e}"
-                )
+                save_figure(fig, run_dir / f"total_clusters_beta={beta_label}_null", formats=("pdf",))
+                import matplotlib.pyplot as plt
 
-                label_slug = f"MLP{i + 1}_init{j + 1}"
+                plt.close(fig)
+
+            null_counts = []
+            null_mode_counts = []
+            null_mass_counts = []
+            for j, theta_hist in enumerate(null_histories):
+                label_slug = f"MLP_null_init{j + 1}"
                 _save_frames_and_gif(
                     run_dir,
                     label_slug,
                     theta_hist,
-                    times,
+                    null_times[j],
                     beta,
                     config.n_particles,
-                    mlp_title,
+                    mlp_null_title,
                     attention_label,
-                    a=mlp_params.a,
-                    omega=mlp_params.omega,
-                    activation=mlp_params.activation,
-                    color=MLP_COLOR,
+                    a=np.empty((0, 2)),
+                    omega=np.empty((0, 2)),
+                    activation=config.activation,
+                    color=NULL_COLOR,
                     plot_interval=config.plot_interval,
                     output_frame_limit=config.output_frame_limit,
+                    show_potential=config.gradient_mlp,
                     save_gif=config.gifs,
                 )
-                if config.num_mlp_inits == 1 and config.num_point_inits == 1:
-                    comparison_path = run_dir / "evolution_MLP_comparison.gif"
-                else:
-                    comparison_path = run_dir / f"evolution_MLP_comparison_{label_slug}.gif"
-                if config.gifs:
-                    _save_comparison_gif(
-                        comparison_path,
-                        null_histories[j],
-                        null_times[j],
-                        theta_hist,
-                        times,
-                        beta,
-                        config.n_particles,
-                        mlp_std_label,
-                        attention_label,
-                        a=mlp_params.a,
-                        omega=mlp_params.omega,
-                        activation=mlp_params.activation,
-                        plot_interval=config.plot_interval,
-                        output_frame_limit=config.output_frame_limit,
-                    )
-                    _save_field_gif(
-                        run_dir,
-                        label_slug,
-                        theta_hist,
-                        times,
-                        beta,
-                        config.n_particles,
-                        mlp_title,
-                        attention_label,
-                        config.attention_mode,
-                        config.ascending,
-                        a=mlp_params.a,
-                        omega=mlp_params.omega,
-                        activation=mlp_params.activation,
-                        plot_interval=config.plot_interval,
-                        output_frame_limit=config.output_frame_limit,
-                    )
-                if config.num_mlp_inits == 1 and config.num_point_inits == 1:
-                    convergence_path = run_dir / "convergence"
-                else:
-                    convergence_path = run_dir / f"convergence_MLP{i + 1}_init{j + 1}"
-                fig = make_convergence_figure(
-                    [beta],
-                    [times],
-                    [theta_hist],
-                    [k_max],
-                    k_limit=config.k_max,
-                    color=MLP_COLOR,
+                null_suffix = "" if config.num_point_inits == 1 else f"_init{j + 1}"
+                traj_null_stem = run_dir / f"trajectories_null{null_suffix}"
+                fig = make_trajectory_figure(
+                    null_times[j],
+                    theta_hist,
+                    color=NULL_COLOR,
                 )
-                save_figure(fig, convergence_path, formats=("pdf",))
+                save_figure(fig, traj_null_stem, formats=("pdf",))
                 import matplotlib.pyplot as plt
 
                 plt.close(fig)
-                fig = make_convergence_figure(
-                    [beta],
-                    [times],
-                    [theta_hist],
-                    [k_max],
-                    k_limit=config.k_max,
-                    color=MLP_COLOR,
+                fig = make_trajectory_figure(
+                    null_times[j],
+                    theta_hist,
+                    color=NULL_COLOR,
                     time_scale="log",
                 )
-                log_path = convergence_path.with_name(f"{convergence_path.name}_log")
-                save_figure(fig, log_path, formats=("pdf",))
+                save_figure(fig, traj_null_stem.with_name(f"{traj_null_stem.name}_log"), formats=("pdf",))
                 plt.close(fig)
                 if is_infinite:
                     conv_idx = len(theta_hist) - 1
                 else:
                     conv_idx = convergence_index(theta_hist, threshold, config.convergence_window)
-                mlp_counts.append(cluster_count(theta_hist[conv_idx], threshold))
-                mlp_mode_counts.append(mode_count(theta_hist[conv_idx], threshold))
-                mlp_mass_counts.append(
+                null_counts.append(cluster_count(theta_hist[conv_idx], threshold))
+                null_mode_counts.append(mode_count(theta_hist[conv_idx], threshold))
+                null_mass_counts.append(
                     mass_count(theta_hist[conv_idx], threshold, config.mass_threshold)
                 )
 
-            if config.num_point_inits > 1:
-                beta_label = f"{beta:.6g}"
-                suffix = f"_MLP{i + 1}" if config.num_mlp_inits > 1 else ""
-                mlp_final = [hist[-1] for hist in mlp_histories]
-                fig = make_total_clusters_figure(
-                    mlp_final,
-                    a=mlp_params.a,
-                    omega=mlp_params.omega,
-                    activation=mlp_params.activation,
-                    color=MLP_COLOR,
-                    shade_regions=False,
-                    show_potential=True,
+            mlp_counts = []
+            mlp_mode_counts = []
+            mlp_mass_counts = []
+            mlp_stop_reasons = []
+            mlp_cluster_times: list[Optional[float]] = []
+            mlp_histogram_densities: list[list[float]] = []
+            for i, mlp_params in enumerate(mlp_params_list):
+                mlp_histories = []
+                mlp_times = []
+                mlp_steps = []
+                for j, theta0 in enumerate(theta0_list):
+                    label = f"beta={beta} MLP{i + 1} init {j + 1}/{config.num_point_inits}"
+                    bar = ProgressHandle(num_steps, label=label)
+                    if is_infinite:
+                        times, theta_hist, step_count, converged = _simulate_until_convergence(
+                            theta0,
+                            sim_config,
+                            mlp_params,
+                            threshold,
+                            config.convergence_window,
+                            config.max_steps,
+                            config.convergence_drift_tol,
+                            config.convergence_spread_factor,
+                            progress=bar.update_to,
+                            progress_every=progress_every,
+                        )
+                        if not converged:
+                            did_not_converge = True
+                        stop_reason = "convergence" if converged else "max_steps"
+                    else:
+                        times, theta_hist = simulate(
+                            theta0,
+                            sim_config,
+                            mlp_params,
+                            progress=bar.update_to,
+                            progress_every=progress_every,
+                        )
+                        step_count = num_steps
+                        stop_reason = "fixed_time"
+                    bar.close()
+                    mlp_histories.append(theta_hist)
+                    mlp_times.append(times)
+                    mlp_steps.append(step_count)
+                    all_steps.append(step_count)
+                    mlp_stop_reasons.append(stop_reason)
+                    mlp_cluster_times.append(
+                        step_count * config.dt if stop_reason == "convergence" else None
+                    )
+                    print(f"  [MLP {i + 1} init {j + 1}] stop_reason={stop_reason}")
+                    att0 = attention_drift_particles(
+                        theta_hist[0],
+                        beta,
+                        config.attention_mode,
+                        self_attention=config.self_attention,
+                        ascending=config.ascending,
+                    )
+                    mlp0 = mlp_drift(theta_hist[0], mlp_params)
+                    total0 = att0 + mlp0
+                    att_end = attention_drift_particles(
+                        theta_hist[-1],
+                        beta,
+                        config.attention_mode,
+                        self_attention=config.self_attention,
+                        ascending=config.ascending,
+                    )
+                    mlp_end = mlp_drift(theta_hist[-1], mlp_params)
+                    total_end = att_end + mlp_end
+                    max_att0 = float(np.max(np.abs(att0))) if att0.size else 0.0
+                    max_mlp0 = float(np.max(np.abs(mlp0))) if mlp0.size else 0.0
+                    max_total0 = float(np.max(np.abs(total0))) if total0.size else 0.0
+                    max_att_end = float(np.max(np.abs(att_end))) if att_end.size else 0.0
+                    max_mlp_end = float(np.max(np.abs(mlp_end))) if mlp_end.size else 0.0
+                    max_total_end = float(np.max(np.abs(total_end))) if total_end.size else 0.0
+                    print(
+                        f"  [MLP {i + 1} init {j + 1}] t=0 max|att|={max_att0:.6e} "
+                        f"max|mlp|={max_mlp0:.6e} max|total|={max_total0:.6e}"
+                    )
+                    print(
+                        f"  [MLP {i + 1} init {j + 1}] t=end max|att|={max_att_end:.6e} "
+                        f"max|mlp|={max_mlp_end:.6e} max|total|={max_total_end:.6e}"
+                    )
+
+                for j, theta_hist in enumerate(mlp_histories):
+                    label_parts = []
+                    if config.num_mlp_inits > 1:
+                        label_parts.append(f"MLP{i + 1}")
+                    if config.num_point_inits > 1:
+                        label_parts.append(f"init{j + 1}")
+                    label_slug = "_".join(label_parts) if label_parts else "MLP"
+                    _save_frames_and_gif(
+                        run_dir,
+                        label_slug,
+                        theta_hist,
+                        mlp_times[j],
+                        beta,
+                        config.n_particles,
+                        mlp_title,
+                        attention_label,
+                        a=mlp_params.a,
+                        omega=mlp_params.omega,
+                        activation=mlp_params.activation,
+                        color=mlp_color,
+                        plot_interval=config.plot_interval,
+                        output_frame_limit=config.output_frame_limit,
+                        show_potential=config.gradient_mlp,
+                        save_gif=config.gifs,
+                    )
+                    mlp_suffix = ""
+                    if config.num_mlp_inits > 1:
+                        mlp_suffix = f"_MLP{i + 1}"
+                    if config.num_point_inits > 1:
+                        mlp_suffix = f"{mlp_suffix}_init{j + 1}"
+                    traj_mlp_stem = run_dir / f"trajectories_MLP{mlp_suffix}"
+                    fig = make_trajectory_figure(
+                        mlp_times[j],
+                        theta_hist,
+                        color=MLP_COLOR,
+                    )
+                    save_figure(fig, traj_mlp_stem, formats=("pdf",))
+                    import matplotlib.pyplot as plt
+
+                    plt.close(fig)
+                    fig = make_trajectory_figure(
+                        mlp_times[j],
+                        theta_hist,
+                        color=MLP_COLOR,
+                        time_scale="log",
+                    )
+                    save_figure(fig, traj_mlp_stem.with_name(f"{traj_mlp_stem.name}_log"), formats=("pdf",))
+                    plt.close(fig)
+                    hist_stem = run_dir / f"histogram{mlp_suffix}"
+                    fig = make_histogram_figure(
+                        theta_hist[-1],
+                        null_histories[j][-1],
+                        a=mlp_params.a,
+                        omega=mlp_params.omega,
+                        activation=mlp_params.activation,
+                        include_null=False,
+                        show_potential=config.gradient_mlp,
+                        mlp_color=mlp_color,
+                    )
+                    save_figure(fig, hist_stem, formats=("pdf",))
+                    plt.close(fig)
+                    hist_null_stem = run_dir / f"histogram_with_null{mlp_suffix}"
+                    fig = make_histogram_figure(
+                        theta_hist[-1],
+                        null_histories[j][-1],
+                        a=mlp_params.a,
+                        omega=mlp_params.omega,
+                        activation=mlp_params.activation,
+                        include_null=True,
+                        show_potential=config.gradient_mlp,
+                        mlp_color=mlp_color,
+                    )
+                    save_figure(fig, hist_null_stem, formats=("pdf",))
+                    plt.close(fig)
+                    if config.num_mlp_inits == 1 and config.num_point_inits == 1:
+                        comparison_path = run_dir / "evolution_MLP_comparison.gif"
+                    else:
+                        comparison_path = run_dir / f"evolution_MLP_comparison_{label_slug}.gif"
+                    if config.gifs:
+                        _save_comparison_gif(
+                            comparison_path,
+                            null_histories[j],
+                            null_times[j],
+                            theta_hist,
+                            mlp_times[j],
+                            beta,
+                            config.n_particles,
+                            mlp_std_label,
+                            attention_label,
+                            a=mlp_params.a,
+                            omega=mlp_params.omega,
+                            activation=mlp_params.activation,
+                            plot_interval=config.plot_interval,
+                            output_frame_limit=config.output_frame_limit,
+                            show_potential=config.gradient_mlp,
+                            mlp_color=mlp_color,
+                        )
+                        _save_field_gif(
+                            run_dir,
+                            label_slug,
+                            theta_hist,
+                            mlp_times[j],
+                            beta,
+                            config.n_particles,
+                            mlp_title,
+                            attention_label,
+                            config.attention_mode,
+                            config.ascending,
+                            a=mlp_params.a,
+                            omega=mlp_params.omega,
+                            activation=mlp_params.activation,
+                            plot_interval=config.plot_interval,
+                            output_frame_limit=config.output_frame_limit,
+                            show_potential=config.gradient_mlp,
+                        )
+                    if is_infinite:
+                        conv_idx = len(theta_hist) - 1
+                    else:
+                        conv_idx = convergence_index(theta_hist, threshold, config.convergence_window)
+                    mlp_counts.append(cluster_count(theta_hist[conv_idx], threshold))
+                    mlp_mode_counts.append(mode_count(theta_hist[conv_idx], threshold))
+                    mlp_mass_counts.append(
+                        mass_count(theta_hist[conv_idx], threshold, config.mass_threshold)
+                    )
+                    mlp_histogram_densities.append(
+                        _histogram_density(theta_hist[-1], histogram_edges)
+                    )
+
+                if config.num_point_inits > 1:
+                    beta_label = f"{beta:.6g}"
+                    suffix = f"_MLP{i + 1}" if config.num_mlp_inits > 1 else ""
+                    mlp_final = [hist[-1] for hist in mlp_histories]
+                    fig = make_total_clusters_figure(
+                        mlp_final,
+                        a=mlp_params.a,
+                        omega=mlp_params.omega,
+                        activation=mlp_params.activation,
+                        color=mlp_color,
+                        shade_regions=False,
+                        show_potential=config.gradient_mlp,
+                    )
+                    save_figure(fig, run_dir / f"total_clusters_beta={beta_label}{suffix}", formats=("pdf",))
+                    import matplotlib.pyplot as plt
+
+                    plt.close(fig)
+
+            actual_num_steps = max(all_steps) if (is_infinite and all_steps) else None
+            actual_total_time = actual_num_steps * config.dt if actual_num_steps is not None else None
+            params = _build_params_dict(
+                config,
+                beta,
+                seeds,
+                num_steps,
+                effective_total_time,
+                mlp_scale=mlp_scale_eff,
+                mlp_scale_mode=config.mlp_scale_mode,
+                actual_num_steps=actual_num_steps,
+                actual_total_time=actual_total_time,
+                actual_mlp_scale=mlp_scale_eff,
+            )
+            write_json(run_dir / "params.json", params, compact=False)
+            run_seconds = time.perf_counter() - run_start
+            _write_run_summary(
+                run_dir,
+                beta,
+                params_json,
+                null_counts,
+                mlp_counts,
+                null_mode_counts,
+                mlp_mode_counts,
+                null_mass_counts,
+                mlp_mass_counts,
+                null_stop_reasons,
+                mlp_stop_reasons,
+                config.num_mlp_inits,
+                config.num_point_inits,
+                run_seconds,
+                mlp_scale_eff,
+                config.mlp_scale_mode,
+                null_cluster_times,
+                mlp_cluster_times,
+                histogram_edges.tolist(),
+                null_histogram_densities,
+                mlp_histogram_densities,
+            )
+
+            if did_not_converge:
+                print("Warning: convergence not reached before max_steps.")
+
+            print(f"Saved results to {run_dir}")
+
+    if multi_scale and sweep_expected_params:
+        entries = _load_scale_summaries(experiment_dir, sweep_expected_params)
+        if entries:
+            payload_entries = []
+            for scale, data, run_dir in entries:
+                entry = dict(data)
+                entry["run_dir"] = str(run_dir)
+                payload_entries.append(entry)
+            payload = {
+                "beta": sweep_beta,
+                "mlp_scale_mode": config.mlp_scale_mode,
+                "entries": payload_entries,
+            }
+            write_json(experiment_dir / "mlp_scale_sweep.json", payload, compact=False)
+            by_beta: dict[float, list[tuple[float, dict, Path]]] = {}
+            for scale, data, run_dir in entries:
+                try:
+                    beta_value = float(data.get("beta", sweep_beta))
+                except (TypeError, ValueError):
+                    continue
+                by_beta.setdefault(beta_value, []).append((scale, data, run_dir))
+
+            for beta_value, items in by_beta.items():
+                items.sort(key=lambda item: item[0])
+                scales = np.asarray([item[0] for item in items], dtype=float)
+                stop_times = np.asarray(
+                    [_stop_time(item[1].get("mlp_cluster_times", [])) for item in items],
+                    dtype=float,
                 )
-                save_figure(fig, run_dir / f"total_clusters_beta={beta_label}{suffix}", formats=("pdf",))
+                fig = make_mlp_scale_stop_time_figure(scales, stop_times)
+                output_dir = items[0][2]
+                save_figure(fig, output_dir / "mlp_scale_stop_time", formats=("pdf",))
                 import matplotlib.pyplot as plt
 
                 plt.close(fig)
 
-            row_labels = [f"init {j + 1}" for j in range(config.num_point_inits)]
-            null_plot_title = rf"$\mathrm{{MLP}}\,=\,0\ (k_{{\mathrm{{max}}}}={k_max})$"
-            mlp_plot_title = rf"$\mathrm{{std(MLP)}}\,=\,{mlp_std_label}$"
-            fig = make_figure_mlp(
-                beta,
-                k_max,
-                null_times,
-                null_histories,
-                mlp_times,
-                mlp_histories,
-                a=mlp_params.a,
-                omega=mlp_params.omega,
-                activation=mlp_params.activation,
-                row_labels=row_labels,
-                null_title=null_plot_title,
-                mlp_title=mlp_plot_title,
-            )
-            save_figure(fig, run_dir / f"figure_MLP{i + 1}", formats=("pdf",))
-            import matplotlib.pyplot as plt
-
-            plt.close(fig)
-            fig = make_figure_mlp(
-                beta,
-                k_max,
-                null_times,
-                null_histories,
-                mlp_times,
-                mlp_histories,
-                a=mlp_params.a,
-                omega=mlp_params.omega,
-                activation=mlp_params.activation,
-                row_labels=row_labels,
-                time_scale="log",
-                null_title=null_plot_title,
-                mlp_title=mlp_plot_title,
-            )
-            save_figure(fig, run_dir / f"figure_MLP{i + 1}_log", formats=("pdf",))
-            plt.close(fig)
-
-        actual_num_steps = max(all_steps) if (is_infinite and all_steps) else None
-        actual_total_time = actual_num_steps * config.dt if actual_num_steps is not None else None
-        params = _build_params_dict(
-            config,
-            beta,
-            seeds,
-            num_steps,
-            effective_total_time,
-            actual_num_steps=actual_num_steps,
-            actual_total_time=actual_total_time,
-            actual_mlp_scale=mlp_scale_eff,
-        )
-        write_json(run_dir / "params.json", params, compact=False)
-        _write_run_summary(
-            run_dir,
-            beta,
-            params_json,
-            null_counts,
-            mlp_counts,
-            null_mode_counts,
-            mlp_mode_counts,
-            null_mass_counts,
-            mlp_mass_counts,
-            config.num_mlp_inits,
-            config.num_point_inits,
-        )
-
-        if did_not_converge:
-            print("Warning: convergence not reached before max_steps.")
-
-        print(f"Saved results to {run_dir}")
+    if multi_scale:
+        return
 
     summaries = _load_run_summaries(experiment_dir, expected_params)
     if summaries:

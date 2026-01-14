@@ -5,7 +5,7 @@ import json
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Sequence
 
 import numpy as np
 
@@ -25,6 +25,8 @@ class RunConfig:
     mlp_units: int
     activation: Activation
     mlp_scale: float
+    mlp_scales: List[float]
+    mlp_scale_mode: str
     gradient_mlp: bool
     particle_seed: int
     mlp_seed: int
@@ -64,6 +66,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "mlp_units": None,
     "activation": "relu",
     "mlp_scale": 0.5,
+    "mlp_scale_mode": "std",
     "gradient_MLP": True,
     "dimension": 2,
     "attention_mode": "unnormalized",
@@ -94,6 +97,29 @@ def _parse_betas(value: Any) -> List[float]:
     raise ValueError("betas must be a list or comma-separated string.")
 
 
+def _parse_mlp_scales(value: Any) -> List[float]:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        scales = [float(v) for v in value]
+        if len(scales) == 3:
+            start, stop, step = scales
+            if step == 0.0:
+                raise ValueError("mlp_scale range step must be non-zero.")
+            if start == stop:
+                return [start]
+            step = abs(step) * (1.0 if stop > start else -1.0)
+            seq = np.arange(start, stop + 0.5 * step, step)
+            if step > 0:
+                seq = seq[seq <= stop + 1e-12]
+            else:
+                seq = seq[seq >= stop - 1e-12]
+            return [float(x) for x in seq]
+    else:
+        scales = [float(value)]
+    if not scales:
+        raise ValueError("mlp_scale must be a number or a non-empty list.")
+    return scales
+
+
 def _parse_total_time(value: Any) -> float:
     if isinstance(value, str):
         lowered = value.strip().lower()
@@ -118,8 +144,6 @@ def load_config(path: Path) -> RunConfig:
     gradient_mlp = merged.get("gradient_MLP", True)
     if not isinstance(gradient_mlp, bool):
         raise ValueError("gradient_MLP must be a boolean.")
-    if not gradient_mlp:
-        raise ValueError("gradient_MLP must be true; this simulator enforces a gradient MLP.")
     merged["gradient_MLP"] = gradient_mlp
 
     betas = _parse_betas(merged["betas"])
@@ -152,6 +176,9 @@ def load_config(path: Path) -> RunConfig:
     activation = str(merged.get("activation", "relu")).strip().lower()
     if activation not in {"relu", "gelu"}:
         raise ValueError("activation must be 'relu' or 'gelu'.")
+    mlp_scale_mode = str(merged.get("mlp_scale_mode", "std")).strip().lower()
+    if mlp_scale_mode not in {"std", "norm"}:
+        raise ValueError("mlp_scale_mode must be 'std' or 'norm'.")
     integrator = str(merged.get("integrator", "euler")).strip().lower()
     if integrator not in {"euler", "rk2", "rk4"}:
         raise ValueError("integrator must be one of: euler, rk2, rk4.")
@@ -171,7 +198,12 @@ def load_config(path: Path) -> RunConfig:
         raise ValueError("gifs must be a boolean.")
 
     mlp_units = merged["mlp_units"] if merged["mlp_units"] is not None else merged["dimension"]
-    merged["mlp_scale"] = float(merged["mlp_scale"])
+    mlp_scales = _parse_mlp_scales(merged["mlp_scale"])
+    if any(scale < 0.0 for scale in mlp_scales):
+        raise ValueError("mlp_scale entries must be non-negative.")
+    if len(mlp_scales) > 1 and len(betas) != 1:
+        raise ValueError("mlp_scale list requires a single beta value.")
+    merged["mlp_scale"] = float(mlp_scales[0])
     if merged["mass_threshold"] < 0.0 or merged["mass_threshold"] > 1.0:
         raise ValueError("mass_threshold must be between 0 and 1.")
     if merged["particle_seed"] is None or merged["mlp_seed"] is None:
@@ -212,6 +244,8 @@ def load_config(path: Path) -> RunConfig:
         mlp_units=mlp_units,
         activation=activation,
         mlp_scale=merged["mlp_scale"],
+        mlp_scales=mlp_scales,
+        mlp_scale_mode=mlp_scale_mode,
         gradient_mlp=gradient_mlp,
         particle_seed=int(merged["particle_seed"]),
         mlp_seed=int(merged["mlp_seed"]),

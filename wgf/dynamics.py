@@ -11,6 +11,7 @@ from scipy.special import erf
 TWO_PI = 2.0 * np.pi
 
 Activation = Literal["relu", "gelu"]
+ScaleMode = Literal["std", "norm"]
 AttentionMode = Literal["unnormalized", "normalized"]
 Integrator = Literal["euler", "rk2", "rk4"]
 
@@ -39,6 +40,7 @@ class MLPConfig:
     n_units: int
     activation: Activation
     weight_scale: float
+    weight_scale_mode: ScaleMode
     gradient_mlp: bool
 
 
@@ -60,13 +62,29 @@ def sample_mlp_params(rng: np.random.Generator, config: MLPConfig) -> MLPParams:
 
     The drift is u(x) = proj_x sum_j omega_j * sigma(a_j dot x).
     """
-    if not config.gradient_mlp:
-        raise ValueError("This simulator enforces a gradient MLP (gradient_MLP=True).")
     a = rng.normal(size=(config.n_units, 2))
     a /= np.linalg.norm(a, axis=1, keepdims=True)
 
-    scalars = rng.normal(scale=config.weight_scale, size=(config.n_units, 1))
-    omega = scalars * a
+    if config.weight_scale_mode == "std":
+        if config.gradient_mlp:
+            scalars = rng.normal(scale=config.weight_scale, size=(config.n_units, 1))
+            omega = scalars * a
+        else:
+            omega = rng.normal(scale=config.weight_scale, size=(config.n_units, 2))
+    elif config.weight_scale_mode == "norm":
+        if config.weight_scale <= 0.0:
+            omega = np.zeros((config.n_units, 2))
+        elif config.gradient_mlp:
+            signs = rng.normal(size=(config.n_units, 1))
+            signs = np.where(signs >= 0.0, 1.0, -1.0)
+            omega = config.weight_scale * signs * a
+        else:
+            omega = rng.normal(size=(config.n_units, 2))
+            norms = np.linalg.norm(omega, axis=1, keepdims=True)
+            norms = np.where(norms > 0.0, norms, 1.0)
+            omega = config.weight_scale * omega / norms
+    else:
+        raise ValueError(f"Unsupported weight_scale_mode: {config.weight_scale_mode}")
     return MLPParams(a=a.astype(np.float64), omega=omega.astype(np.float64), activation=config.activation)
 
 

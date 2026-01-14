@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Optional, Sequence
 
 
 def canonical_json(data: Any) -> str:
@@ -56,41 +56,6 @@ def write_json(path: Path, data: Any, compact: bool = False) -> None:
     else:
         text = json.dumps(data, ensure_ascii=True, indent=2)
     path.write_text(text, encoding="utf-8")
-
-
-def save_gif(frame_paths: Iterable[Path], output_path: Path, frame_duration_s: float) -> bool:
-    paths = list(frame_paths)
-    if not paths:
-        return False
-
-    try:
-        from PIL import Image
-    except Exception:
-        Image = None
-
-    if Image is not None:
-        images = [Image.open(path) for path in paths]
-        duration_ms = int(round(frame_duration_s * 1000))
-        images[0].save(
-            output_path,
-            save_all=True,
-            append_images=images[1:],
-            duration=duration_ms,
-            loop=0,
-        )
-        for img in images:
-            img.close()
-        return True
-
-    try:
-        import imageio.v2 as imageio
-    except Exception:
-        return False
-
-    with imageio.get_writer(output_path, mode="I", duration=frame_duration_s) as writer:
-        for path in paths:
-            writer.append_data(imageio.imread(path))
-    return True
 
 
 def save_gif_from_images(images: Sequence, output_path: Path, frame_duration_s: float) -> bool:

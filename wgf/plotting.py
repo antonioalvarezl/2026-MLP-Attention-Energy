@@ -7,6 +7,7 @@ from typing import List, Optional
 from numpy.typing import NDArray
 import matplotlib as mpl
 import numpy as np
+from scipy.interpolate import CubicSpline
 from scipy.special import iv
 
 ROOT = Path(__file__).resolve().parent
@@ -37,6 +38,7 @@ mpl.rcParams.update(
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm, to_rgb
+from matplotlib.ticker import MaxNLocator
 from matplotlib.patches import Wedge
 from scipy.special import erf
 
@@ -46,12 +48,13 @@ POTENTIAL_POS_COLOR = "#009E73"
 POTENTIAL_NEG_COLOR =  "#D55E00"
 NULL_COLOR ="#ED5E93"
 MLP_COLOR =  "#0072B2"
+SA_COLOR = "#17BECF"
+STOP_SA_COLOR = "#D55E00"
 POINT_COLOR ="#000000"
 POTENTIAL_CMAP = LinearSegmentedColormap.from_list(
     "potential",
     [POTENTIAL_NEG_COLOR, "#FFFFFF", POTENTIAL_POS_COLOR],
 )
-
 
 def _latex_text(label: str) -> str:
     if "$" in label:
@@ -178,13 +181,13 @@ def plot_trajectories(
     color: str,
     angle_bins: int = 120,
     time_bins: int = 200,
-    max_particles: int = 80,
-    time_stride: int = 1,
+    max_particles: int = 150,
+    time_stride: int = 2,
     time_scale: str = "linear",
     line_width: float = 0.6,
     line_style: Optional[object] = None,
 ) -> None:
-    # Subsample trajectories but skip density weighting.
+    # Subsample trajectories and shade by local density.
     if time_stride < 1:
         time_stride = 1
     times_plot = np.asarray(times, dtype=float)
@@ -207,15 +210,64 @@ def plot_trajectories(
     base = np.array(to_rgb(color))
     line_color = 0.7 * base + 0.3
     line_alpha = 1.0
+    min_mix = 0.25
+    density_gamma = 0.7
     segments = []
+    colors = []
 
-    for idx in particle_idx:
+    density_sel = None
+    density_min = 1.0
+    density_max = 1.0
+    use_density = False
+    if times_s.size > 0 and n_particles > 0:
+        angle_bins = max(8, int(angle_bins))
+        theta_mod = np.mod(theta_s, TWO_PI)
+        bin_idx = np.floor(theta_mod * angle_bins / TWO_PI).astype(int)
+        bin_idx = np.clip(bin_idx, 0, angle_bins - 1)
+        counts = np.zeros((times_s.size, angle_bins), dtype=int)
+        for t_idx in range(times_s.size):
+            counts[t_idx] = np.bincount(bin_idx[t_idx], minlength=angle_bins)
+        density_sel = counts[np.arange(times_s.size)[:, None], bin_idx[:, particle_idx]]
+        density_min = float(np.min(density_sel))
+        density_max = float(np.max(density_sel))
+        use_density = density_max > density_min
+
+    spline_target_points = 400
+    spline_min_points = 60
+    max_fit_points = 600
+    t_fit = None
+    t_smooth = None
+    fit_stride = 1
+    if times_s.size >= 4:
+        fit_stride = max(1, int(times_s.size // max_fit_points))
+        t_fit = times_s[::fit_stride]
+        if t_fit.size >= 4:
+            target = min(spline_target_points, max(spline_min_points, t_fit.size * 2))
+            if time_scale == "log":
+                t_smooth = np.geomspace(t_fit[0], t_fit[-1], target)
+            else:
+                t_smooth = np.linspace(t_fit[0], t_fit[-1], target)
+
+    for p_idx, idx in enumerate(particle_idx):
         angles = theta_s[:, idx]
         angles_unwrapped = np.unwrap(angles, discont=np.pi)
         angles_unwrapped = _align_unwrapped(angles_unwrapped, ref_angle)
         t_vals = times_s
+        density_vals = None
+        if density_sel is not None:
+            density_vals = density_sel[:, p_idx]
+        if t_fit is not None and t_smooth is not None:
+            cs = CubicSpline(t_fit, angles_unwrapped[::fit_stride], bc_type="natural")
+            angles_unwrapped = cs(t_smooth)
+            t_vals = t_smooth
+            if density_vals is not None:
+                density_fit = density_vals[::fit_stride]
+                if density_fit.size >= 2:
+                    density_vals = np.interp(t_smooth, t_fit, density_fit)
+                else:
+                    density_vals = np.full_like(t_smooth, density_fit[0] if density_fit.size else density_min)
 
-        for k in range(len(angles) - 1):
+        for k in range(len(angles_unwrapped) - 1):
             for seg in _split_wrapped_segment(
                 t_vals[k],
                 angles_unwrapped[k],
@@ -223,11 +275,20 @@ def plot_trajectories(
                 angles_unwrapped[k + 1],
             ):
                 segments.append(seg)
+                if use_density and density_vals is not None:
+                    density = density_vals[k]
+                    norm = (density - density_min) / (density_max - density_min)
+                    norm = float(np.clip(norm, 0.0, 1.0)) ** density_gamma
+                    mix = min_mix + (1.0 - min_mix) * norm
+                    seg_color = base * mix + (1.0 - mix)
+                    colors.append((seg_color[0], seg_color[1], seg_color[2], line_alpha))
+                else:
+                    colors.append((line_color[0], line_color[1], line_color[2], line_alpha))
 
     if segments:
         lc = LineCollection(
             segments,
-            colors=[(line_color[0], line_color[1], line_color[2], line_alpha)],
+            colors=colors,
             linewidths=line_width,
             antialiaseds=True,
         )
@@ -392,6 +453,8 @@ def plot_histogram_with_potential(
     omega: np.ndarray,
     activation: str,
     bins: int = 80,
+    show_potential: bool = True,
+    mlp_color: str = MLP_COLOR,
 ) -> None:
     counts, edges = np.histogram(theta, bins=bins, range=(0.0, TWO_PI), density=True)
     width = edges[1] - edges[0]
@@ -402,7 +465,7 @@ def plot_histogram_with_potential(
         counts_null, _ = np.histogram(null_theta, bins=edges, density=True)
         max_height = max(max_height, counts_null.max())
 
-    if a.size:
+    if show_potential and a.size:
         grid = np.linspace(0.0, TWO_PI, bins * 4, endpoint=False)
         potential = mlp_potential(grid, a, omega, activation)
         max_abs = np.max(np.abs(potential))
@@ -423,7 +486,7 @@ def plot_histogram_with_potential(
         counts,
         width=width,
         align="edge",
-        color=MLP_COLOR,
+        color=mlp_color,
         alpha=1.0,
         edgecolor="none",
     )
@@ -441,75 +504,98 @@ def plot_histogram_with_potential(
     ax.set_xlim(0.0, TWO_PI)
     ax.set_xticks([0.0, np.pi, TWO_PI], ["0", r"$\pi$", r"$2\pi$"])
     ax.set_xlabel(r"$\theta$")
-    ax.set_ylabel(r"$\rho(\theta)$")
+    ax.set_ylabel(r"$\mu(\theta)$")
 
 
-def make_figure_mlp(
-    beta: float,
-    k_max: int,
-    null_times: List[np.ndarray] | np.ndarray,
-    null_histories: List[np.ndarray],
-    mlp_times: List[np.ndarray] | np.ndarray,
-    mlp_histories: List[np.ndarray],
+def make_trajectory_figure(
+    times: np.ndarray,
+    theta_hist: np.ndarray,
+    color: str,
+    time_scale: str = "linear",
+) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(4.2, 4.0), constrained_layout=True)
+    plot_trajectories(
+        ax,
+        times,
+        theta_hist,
+        color=color,
+        time_scale=time_scale,
+        line_style="solid",
+    )
+    return fig
+
+
+def make_histogram_figure(
+    theta: np.ndarray,
+    null_theta: Optional[np.ndarray],
     a: np.ndarray,
     omega: np.ndarray,
     activation: str,
-    row_labels: List[str],
-    time_scale: str = "linear",
-    null_title: Optional[str] = None,
-    mlp_title: Optional[str] = None,
-):
-    n_rows = len(mlp_histories)
-    if isinstance(null_times, np.ndarray):
-        null_times_list = [null_times] * n_rows
-    else:
-        null_times_list = null_times
-    if isinstance(mlp_times, np.ndarray):
-        mlp_times_list = [mlp_times] * n_rows
-    else:
-        mlp_times_list = mlp_times
-
-    fig, axes = plt.subplots(
-        nrows=n_rows,
-        ncols=3,
-        figsize=(12.5, 4.0 * n_rows),
-        constrained_layout=True,
+    include_null: bool = True,
+    show_potential: bool = True,
+    mlp_color: str = MLP_COLOR,
+) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(4.2, 4.0), constrained_layout=True)
+    plot_histogram_with_potential(
+        ax,
+        theta,
+        null_theta if include_null else None,
+        a=a,
+        omega=omega,
+        activation=activation,
+        show_potential=show_potential,
+        mlp_color=mlp_color,
     )
-    if n_rows == 1:
-        axes = np.array([axes])
+    return fig
 
-    for row, (null_hist, mlp_hist, label) in enumerate(zip(null_histories, mlp_histories, row_labels)):
-        plot_trajectories(
-            axes[row, 0],
-            null_times_list[row],
-            null_hist,
-            color=NULL_COLOR,
-            time_scale=time_scale,
-            line_style="solid",
-        )
-        plot_trajectories(
-            axes[row, 1],
-            mlp_times_list[row],
-            mlp_hist,
-            color=MLP_COLOR,
-            time_scale=time_scale,
-            line_style="solid",
-        )
-        plot_histogram_with_potential(
-            axes[row, 2],
-            mlp_hist[-1],
-            null_hist[-1],
-            a=a,
-            omega=omega,
-            activation=activation,
-        )
 
+def make_gamma_figure(beta: float, k_limit: int, k_max: int) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(4.2, 4.0), constrained_layout=True)
+    plot_gamma(ax, beta, k_limit, k_max)
     return fig
 
 
 def save_figure(fig, output_stem: Path, formats: tuple[str, ...] = ("pdf",)) -> None:
     for fmt in formats:
         fig.savefig(output_stem.with_suffix(f".{fmt}"), dpi=PLOT_DPI)
+
+
+def make_mlp_scale_stop_time_figure(
+    scales: np.ndarray,
+    stop_times: np.ndarray,
+    point_size: float = 3.0,
+    line_width: float = 1.2,
+) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(6.0, 4.0), constrained_layout=True)
+    ax.plot(scales, stop_times, color=MLP_COLOR, linewidth=line_width)
+    ax.scatter(scales, stop_times, color=MLP_COLOR, s=point_size, zorder=3)
+    ax.set_xlabel(r"$|\omega_j|$")
+    ax.set_ylabel(r"$\mathrm{Stopping\ time\ (s)}$")
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=12))
+    ax.set_ylim(bottom=0.0)
+    ax.grid(True, linewidth=0.4, alpha=0.35)
+    return fig
+
+
+def make_mlp_scale_stop_time_comparison_figure(
+    usa_scales: np.ndarray,
+    usa_stop_times: np.ndarray,
+    sa_scales: np.ndarray,
+    sa_stop_times: np.ndarray,
+    point_size: float = 3.0,
+    line_width: float = 1.2,
+) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(6.0, 4.0), constrained_layout=True)
+    ax.plot(usa_scales, usa_stop_times, color=MLP_COLOR, linewidth=line_width)
+    ax.plot(sa_scales, sa_stop_times, color=STOP_SA_COLOR, linewidth=line_width)
+    ax.scatter(usa_scales, usa_stop_times, color=MLP_COLOR, s=point_size, zorder=3)
+    ax.scatter(sa_scales, sa_stop_times, color=STOP_SA_COLOR, s=point_size, zorder=3)
+    ax.set_xlabel(r"$|\omega_j|$")
+    ax.set_ylabel(r"$\mathrm{Stopping\ time\ (s)}$")
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=12))
+    ax.set_ylim(bottom=0.0)
+    ax.grid(True, linewidth=0.4, alpha=0.35)
+    return fig
 
 
 
@@ -586,7 +672,7 @@ def plot_histogram_1d(
     ax.set_xlim(0.0, TWO_PI)
     ax.set_xticks([0.0, np.pi, TWO_PI], ["0", r"$\pi$", r"$2\pi$"])
     ax.set_xlabel(r"$\theta$")
-    ax.set_ylabel(r"$\rho(\theta)$")
+    ax.set_ylabel(r"$\mu(\theta)$")
 
 
 def make_convergence_figure(
@@ -694,8 +780,6 @@ def make_mlp_figure(
     num_points: int = 256,
     vector_points: int = 32,
 ) -> plt.Figure:
-    if not gradient_mlp:
-        raise ValueError("MLP plot requires a gradient field (gradient_MLP=True).")
     fig, ax = plt.subplots(figsize=(5.5, 5.5))
     ax.set_aspect("equal")
     ax.set_xlim(-1.4, 1.4)
@@ -712,7 +796,7 @@ def make_mlp_figure(
 
     theta = np.linspace(0.0, TWO_PI, num_points, endpoint=False)
 
-    if gradient_mlp:
+    if gradient_mlp and a.size:
         potential = mlp_potential(theta, a, omega, activation)
         centered = potential - potential.mean()
         scale = 0.25 / (np.max(np.abs(centered)) + 1e-8)
@@ -764,16 +848,27 @@ def make_histogram_frame(
     omega: np.ndarray,
     activation: str,
     color: str,
+    shade_regions: bool = True,
     bins: int = 120,
     max_bar: float = 0.35,
+    show_potential: bool = True,
 ) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(5.5, 5.5))
-    plot_circular_histogram(ax, theta, a, bins=bins, max_bar=max_bar, color=color)
+    plot_circular_histogram(
+        ax,
+        theta,
+        a,
+        bins=bins,
+        max_bar=max_bar,
+        color=color,
+        shade_regions=shade_regions,
+    )
 
-    potential_bins = max(360, bins * 4)
-    theta_grid = np.linspace(0.0, TWO_PI, potential_bins, endpoint=False)
-    potential = mlp_potential(theta_grid, a, omega, activation)
-    _draw_potential_inside(ax, theta_grid, potential)
+    if show_potential and a.size:
+        potential_bins = max(1440, bins * 12)
+        theta_grid = np.linspace(0.0, TWO_PI, potential_bins, endpoint=False)
+        potential = mlp_potential(theta_grid, a, omega, activation)
+        _draw_potential_inside(ax, theta_grid, potential)
 
     ax.scatter(np.cos(theta), np.sin(theta), s=6, color=POINT_COLOR, alpha=0.6, zorder=4)
     ax.set_title(
@@ -797,6 +892,7 @@ def make_histogram_comparison_frame(
     activation: str,
     bins: int = 120,
     max_bar: float = 0.35,
+    show_potential: bool = True,
 ) -> plt.Figure:
     fig, axes = plt.subplots(ncols=2, figsize=(11.0, 5.5), constrained_layout=True)
 
@@ -805,10 +901,11 @@ def make_histogram_comparison_frame(
     plot_circular_histogram(axes[0], theta_null, a_null, bins=bins, max_bar=max_bar, color=NULL_COLOR)
     plot_circular_histogram(axes[1], theta_mlp, a, bins=bins, max_bar=max_bar, color=MLP_COLOR)
 
-    potential_bins = max(360, bins * 4)
-    theta_grid = np.linspace(0.0, TWO_PI, potential_bins, endpoint=False)
-    potential = mlp_potential(theta_grid, a, omega, activation)
-    _draw_potential_inside(axes[1], theta_grid, potential)
+    if show_potential and a.size:
+        potential_bins = max(1440, bins * 12)
+        theta_grid = np.linspace(0.0, TWO_PI, potential_bins, endpoint=False)
+        potential = mlp_potential(theta_grid, a, omega, activation)
+        _draw_potential_inside(axes[1], theta_grid, potential)
 
     axes[0].scatter(
         np.cos(theta_null),
@@ -870,7 +967,7 @@ def make_field_frame(
     field: np.ndarray,
     attention_field: Optional[np.ndarray],
     mlp_field: Optional[np.ndarray],
-    potential: np.ndarray,
+    potential: Optional[np.ndarray],
     time_value: float,
     beta: float,
     n_particles: int,
@@ -881,18 +978,19 @@ def make_field_frame(
     fig, ax = plt.subplots(figsize=(7.0, 3.0), constrained_layout=True)
     y_min, y_max = y_limits
 
-    max_abs = np.max(np.abs(potential)) if potential.size else 0.0
-    if max_abs > 0.0:
-        norm = TwoSlopeNorm(vcenter=0.0, vmin=-max_abs, vmax=max_abs)
-        ax.imshow(
-            potential[None, :],
-            extent=(0.0, TWO_PI, y_min, y_max),
-            aspect="auto",
-            cmap=POTENTIAL_CMAP,
-            alpha=0.35,
-            norm=norm,
-            origin="lower",
-        )
+    if potential is not None and potential.size:
+        max_abs = np.max(np.abs(potential))
+        if max_abs > 0.0:
+            norm = TwoSlopeNorm(vcenter=0.0, vmin=-max_abs, vmax=max_abs)
+            ax.imshow(
+                potential[None, :],
+                extent=(0.0, TWO_PI, y_min, y_max),
+                aspect="auto",
+                cmap=POTENTIAL_CMAP,
+                alpha=0.35,
+                norm=norm,
+                origin="lower",
+            )
 
     ax.plot(theta, field, color="black", linewidth=1.6, label=r"$u$")
     if attention_field is not None:
