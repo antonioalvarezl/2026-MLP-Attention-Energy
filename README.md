@@ -1,8 +1,23 @@
-# Transformer Dynamics as Gradient Flow on S1
+# Transformer Dynamics as Gradient Flow on the sphere
 
 This repo simulates transformer-style dynamics (self-attention + MLP) on the
 unit circle S1, interpreted as a gradient flow. Two variants are supported:
 unnormalized self-attention (USA) and normalized self-attention (SA).
+
+**Unnormalized self-attention + Gradient Ascent**
+
+![Demo](examples/USA.gif)
+
+**Normalized self-attention + Gradient Ascent**
+![Demo](examples/SA.gif)
+
+**Unnormalized self-attention + Gradient Descent**
+
+![Demo](examples/USAd.gif)
+
+**Normalized self-attention + Gradient Descent**
+
+![Demo](examples/SAd.gif)
 
 ## Model
 
