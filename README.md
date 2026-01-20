@@ -9,23 +9,6 @@ manifolds, interpreted as Wasserstein gradient flows. Two geometries are support
 Two attention variants are available: unnormalized self-attention (USA) and
 normalized self-attention (SA).
 
-
-**Unnormalized self-attention + Gradient Ascent (ReLU)**
-
-![Demo](examples/USA.gif)
-
-**Normalized self-attention + Gradient Ascent (ReLU)**
-![Demo](examples/SA.gif)
-
-**Unnormalized self-attention + Gradient Descent (GeLU)**
-
-![Demo](examples/USAd.gif)
-
-**Normalized self-attention + Gradient Descent (GeLU)**
-
-![Demo](examples/SAd.gif)
-
-
 ## Model
 
 ### S¹ (Circle)
@@ -123,8 +106,10 @@ produces its own run folder.
 - `sphere_init_*.pdf` — initial particle configuration
 - `sphere_middle_*.pdf` — mid-evolution snapshot
 - `sphere_final_*.pdf` — final configuration
-- `sphere_histogram_*.pdf` — 3D bar histogram (φ-θ projection)
-- `sphere_histogram_*_boundaries.pdf` — histogram with MLP decision boundaries
+- `sphere_histogram_init_*.pdf` — 3D bar histogram at initial time
+- `sphere_histogram_middle_*.pdf` — 3D bar histogram at middle time
+- `sphere_histogram_final_*.pdf` — 3D bar histogram at final time
+- `sphere_histogram_final_*_boundaries.pdf` — final histogram with MLP decision boundaries
 - `sphere_trajectory_*.pdf` — 3D trajectory plot (linear time scale)
 - `sphere_trajectory_*_log.pdf` — 3D trajectory plot (log time scale)
 - `sphere_evolution.gif` — animated sphere evolution (if `gif_sphere=true`)
@@ -135,6 +120,16 @@ produces its own run folder.
   - Points vs Histogram display modes
   - Potential field overlay toggle
   - PDF/PNG export buttons
+
+### summary.json contents
+
+Each beta's `summary.json` includes:
+- `beta`, `sqrt_beta` — inverse temperature
+- `null_counts`, `mlp_counts` — final cluster counts
+- `null_stop_reasons`, `mlp_stop_reasons` — how simulation ended (`"convergence"`, `"max_steps"`, `"mlp_time"`)
+- `max_drift_final_null`, `max_drift_final_mlp` — max drift magnitude at stopping time
+- `positions_initial`, `positions_final_*` — particle positions for regenerating plots
+- `runtime_seconds` — wall clock time
 
 ### Experiment-level outputs
 
