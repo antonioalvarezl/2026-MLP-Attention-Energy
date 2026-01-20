@@ -12,10 +12,26 @@ def canonical_json(data: Any) -> str:
 
 
 def _normalize_params(data: Any) -> Any:
+    """Normalize params for comparison, removing fields that don't affect dynamics."""
     if not isinstance(data, dict):
         return data
     cleaned = dict(data)
-    for key in ("actual_num_steps", "actual_total_time", "actual_mlp_scale"):
+    # Remove fields that don't affect simulation dynamics
+    for key in (
+        # Actual results (vary by run)
+        "actual_num_steps",
+        "actual_total_time",
+        "actual_mlp_scale",
+        # Output options (don't affect dynamics)
+        "gif_sphere",
+        "gif_histogram",
+        "pdf_trajectory",
+        "output_frame_limit",
+        "mlp0_output_frame_limit",
+        "plot_interval",
+        "sphere_html_view",
+        "sphere_gif_rotations",
+    ):
         cleaned.pop(key, None)
     return cleaned
 

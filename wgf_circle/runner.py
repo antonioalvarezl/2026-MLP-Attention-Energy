@@ -639,6 +639,12 @@ def _write_run_summary(
     histogram_edges: list[float],
     null_histogram_densities: list[list[float]],
     mlp_histogram_densities: list[list[float]],
+    *,
+    positions_initial: Optional[np.ndarray] = None,
+    positions_final_null: Optional[np.ndarray] = None,
+    positions_final_mlp: Optional[np.ndarray] = None,
+    max_drift_final_null: Optional[list[float]] = None,
+    max_drift_final_mlp: Optional[list[float]] = None,
 ) -> None:
     summary = {
         "beta": beta,
@@ -663,6 +669,18 @@ def _write_run_summary(
         "null_histogram_densities": null_histogram_densities,
         "mlp_histogram_densities": mlp_histogram_densities,
     }
+    # Add position snapshots if available (for regenerating images without re-simulation)
+    if positions_initial is not None:
+        summary["positions_initial"] = positions_initial.tolist()
+    if positions_final_null is not None:
+        summary["positions_final_null"] = positions_final_null.tolist()
+    if positions_final_mlp is not None:
+        summary["positions_final_mlp"] = positions_final_mlp.tolist()
+    # Add max drift values at convergence
+    if max_drift_final_null is not None:
+        summary["max_drift_final_null"] = max_drift_final_null
+    if max_drift_final_mlp is not None:
+        summary["max_drift_final_mlp"] = max_drift_final_mlp
     write_json(run_dir / "summary.json", summary, compact=False)
 
 
@@ -1284,6 +1302,44 @@ def run_experiment(config: RunConfig) -> None:
             )
             write_json(run_dir / "params.json", params, compact=False)
             run_seconds = time.perf_counter() - run_start
+            # Prepare position snapshots for summary (first init only)
+            pos_initial = theta0_list[0] if theta0_list else None
+            pos_final_null = null_histories[0][-1] if null_histories and null_histories[0] else None
+            pos_final_mlp = mlp_histories[0][-1] if mlp_histories and mlp_histories[0] else None
+            
+            # Compute max drift at convergence for null model
+            max_drift_null_list = []
+            if pos_final_null is not None:
+                null_drift = attention_drift_particles(
+                    pos_final_null,
+                    beta,
+                    config.attention_mode,
+                    self_attention=config.self_attention,
+                    ascending=config.ascending,
+                )
+                max_drift_null = float(np.max(np.abs(null_drift)))
+                max_drift_null_list = [max_drift_null]
+            
+            # Compute max drift at convergence for MLP model
+            max_drift_mlp_list = []
+            if pos_final_mlp is not None:
+                # Get the first MLP params (there should be one at this point)
+                first_mlp_params = None
+                if mlp_params_list:
+                    first_mlp_params = mlp_params_list[0]
+                
+                mlp_d = mlp_drift(pos_final_mlp, first_mlp_params) if first_mlp_params else np.zeros_like(pos_final_mlp)
+                att_d = attention_drift_particles(
+                    pos_final_mlp,
+                    beta,
+                    config.attention_mode,
+                    self_attention=config.self_attention,
+                    ascending=config.ascending,
+                )
+                total_drift_mlp = att_d + mlp_d
+                max_drift_mlp = float(np.max(np.abs(total_drift_mlp)))
+                max_drift_mlp_list = [max_drift_mlp]
+            
             _write_run_summary(
                 run_dir,
                 beta,
@@ -1306,6 +1362,11 @@ def run_experiment(config: RunConfig) -> None:
                 histogram_edges.tolist(),
                 null_histogram_densities,
                 mlp_histogram_densities,
+                positions_initial=pos_initial,
+                positions_final_null=pos_final_null,
+                positions_final_mlp=pos_final_mlp,
+                max_drift_final_null=max_drift_null_list if max_drift_null_list else None,
+                max_drift_final_mlp=max_drift_mlp_list if max_drift_mlp_list else None,
             )
 
             if did_not_converge:
