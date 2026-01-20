@@ -9,6 +9,23 @@ manifolds, interpreted as Wasserstein gradient flows. Two geometries are support
 Two attention variants are available: unnormalized self-attention (USA) and
 normalized self-attention (SA).
 
+
+**Unnormalized self-attention + Gradient Ascent (ReLU)**
+
+![Demo](examples/USA.gif)
+
+**Normalized self-attention + Gradient Ascent (ReLU)**
+![Demo](examples/SA.gif)
+
+**Unnormalized self-attention + Gradient Descent (GeLU)**
+
+![Demo](examples/USAd.gif)
+
+**Normalized self-attention + Gradient Descent (GeLU)**
+
+![Demo](examples/SAd.gif)
+
+
 ## Model
 
 ### S¹ (Circle)
