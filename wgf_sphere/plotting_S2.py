@@ -657,7 +657,7 @@ def _plot_s2_histogram_bars(
 
     if hasattr(ax, "computed_zorder"):
         ax.computed_zorder = False
-    floor_res = max(300, bins * 6)
+    floor_res = max(600, bins * 12)
     phi_floor = np.linspace(0.0, TWO_PI, floor_res)
     theta_floor = np.linspace(0.0, TWO_PI, floor_res)
     floor_potential = _potential_on_square_grid(

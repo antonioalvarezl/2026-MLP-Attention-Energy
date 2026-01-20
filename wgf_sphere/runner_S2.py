@@ -603,6 +603,14 @@ def _write_run_summary(
     histogram_edges: list[float],
     null_histogram_densities: list[list[float]],
     mlp_histogram_densities: list[list[float]],
+    *,
+    positions_initial: Optional[np.ndarray] = None,
+    positions_middle_null: Optional[np.ndarray] = None,
+    positions_middle_mlp: Optional[np.ndarray] = None,
+    positions_final_null: Optional[np.ndarray] = None,
+    positions_final_mlp: Optional[np.ndarray] = None,
+    max_drift_final_null: Optional[list[float]] = None,
+    max_drift_final_mlp: Optional[list[float]] = None,
 ) -> None:
     summary = {
         "beta": beta,
@@ -627,6 +635,22 @@ def _write_run_summary(
         "null_histogram_densities": null_histogram_densities,
         "mlp_histogram_densities": mlp_histogram_densities,
     }
+    # Add position snapshots if available (for regenerating images without re-simulation)
+    if positions_initial is not None:
+        summary["positions_initial"] = positions_initial.tolist()
+    if positions_middle_null is not None:
+        summary["positions_middle_null"] = positions_middle_null.tolist()
+    if positions_middle_mlp is not None:
+        summary["positions_middle_mlp"] = positions_middle_mlp.tolist()
+    if positions_final_null is not None:
+        summary["positions_final_null"] = positions_final_null.tolist()
+    if positions_final_mlp is not None:
+        summary["positions_final_mlp"] = positions_final_mlp.tolist()
+    # Add max drift values at convergence
+    if max_drift_final_null is not None:
+        summary["max_drift_final_null"] = max_drift_final_null
+    if max_drift_final_mlp is not None:
+        summary["max_drift_final_mlp"] = max_drift_final_mlp
     write_json(run_dir / "summary.json", summary, compact=False)
 
 
@@ -1127,6 +1151,45 @@ def run_experiment_s2(config: RunConfig) -> None:
             )
             write_json(run_dir / "params.json", params, compact=False)
             run_seconds = time.perf_counter() - run_start
+            
+            # Compute middle positions for summary (before generating images)
+            if example_null_hist is not None and len(example_null_hist) > 1:
+                mid_null = example_null_hist[len(example_null_hist) // 2]
+            else:
+                mid_null = example_null_final
+            if example_mlp_hist is not None and len(example_mlp_hist) > 1:
+                mid_mlp = example_mlp_hist[len(example_mlp_hist) // 2]
+            else:
+                mid_mlp = example_mlp_final if example_mlp_final is not None else mid_null
+            
+            # Compute max drift at convergence for null model
+            max_drift_null_list = []
+            if example_null_final is not None:
+                null_drift = attention_drift_particles_vectors(
+                    example_null_final,
+                    beta,
+                    sim_config.attention_mode,
+                    self_attention=sim_config.self_attention,
+                    ascending=sim_config.ascending,
+                )
+                max_drift_null = float(np.max(np.linalg.norm(null_drift, axis=1)))
+                max_drift_null_list = [max_drift_null] if config.num_point_inits > 0 else []
+            
+            # Compute max drift at convergence for MLP model
+            max_drift_mlp_list = []
+            if example_mlp_final is not None and example_mlp_params is not None:
+                mlp_drift = mlp_drift_vectors(example_mlp_final, example_mlp_params)
+                att_drift = attention_drift_particles_vectors(
+                    example_mlp_final,
+                    beta,
+                    sim_config.attention_mode,
+                    self_attention=sim_config.self_attention,
+                    ascending=sim_config.ascending,
+                )
+                total_drift_mlp = att_drift + mlp_drift
+                max_drift_mlp = float(np.max(np.linalg.norm(total_drift_mlp, axis=1)))
+                max_drift_mlp_list = [max_drift_mlp] if config.num_mlp_inits > 0 else []
+            
             _write_run_summary(
                 run_dir,
                 beta,
@@ -1149,6 +1212,13 @@ def run_experiment_s2(config: RunConfig) -> None:
                 [],
                 [],
                 [],
+                positions_initial=example_initial,
+                positions_middle_null=mid_null,
+                positions_middle_mlp=mid_mlp,
+                positions_final_null=example_null_final,
+                positions_final_mlp=example_mlp_final,
+                max_drift_final_null=max_drift_null_list if max_drift_null_list else None,
+                max_drift_final_mlp=max_drift_mlp_list if max_drift_mlp_list else None,
             )
 
             if example_mlp_final is not None:
@@ -1179,12 +1249,7 @@ def run_experiment_s2(config: RunConfig) -> None:
                 )
                 save_figure(fig, run_dir / "sphere_init_mlp", formats=("pdf",))
                 plt.close(fig)
-                mid_null = example_null_hist[len(example_null_hist) // 2]
-                mid_mlp = (
-                    example_mlp_hist[len(example_mlp_hist) // 2]
-                    if example_mlp_hist is not None
-                    else example_null_hist[len(example_null_hist) // 2]
-                )
+                # mid_null and mid_mlp already computed before _write_run_summary
                 fig = make_s2_single_figure(
                     mid_null,
                     NULL_COLOR,
@@ -1221,13 +1286,51 @@ def run_experiment_s2(config: RunConfig) -> None:
                 )
                 save_figure(fig, run_dir / "sphere_final_mlp", formats=("pdf",))
                 plt.close(fig)
+                # ---------- HISTOGRAMS at initial, middle, final ----------
+                # Initial histograms
+                fig = make_s2_histogram_bar_figure(
+                    example_initial,
+                    NULL_COLOR,
+                    potential_params=None,
+                    show_potential=False,
+                )
+                save_figure(fig, run_dir / "sphere_histogram_init_null", formats=("pdf",))
+                plt.close(fig)
+                fig = make_s2_histogram_bar_figure(
+                    example_initial,
+                    mlp_color,
+                    potential_params=potential_params,
+                    show_potential=config.gradient_mlp,
+                    show_decision_boundaries=False,
+                )
+                save_figure(fig, run_dir / "sphere_histogram_init_mlp", formats=("pdf",))
+                plt.close(fig)
+                # Middle histograms
+                fig = make_s2_histogram_bar_figure(
+                    mid_null,
+                    NULL_COLOR,
+                    potential_params=None,
+                    show_potential=False,
+                )
+                save_figure(fig, run_dir / "sphere_histogram_middle_null", formats=("pdf",))
+                plt.close(fig)
+                fig = make_s2_histogram_bar_figure(
+                    mid_mlp,
+                    mlp_color,
+                    potential_params=potential_params,
+                    show_potential=config.gradient_mlp,
+                    show_decision_boundaries=False,
+                )
+                save_figure(fig, run_dir / "sphere_histogram_middle_mlp", formats=("pdf",))
+                plt.close(fig)
+                # Final histograms
                 fig = make_s2_histogram_bar_figure(
                     example_null_final,
                     NULL_COLOR,
                     potential_params=None,
                     show_potential=False,
                 )
-                save_figure(fig, run_dir / "sphere_histogram_null", formats=("pdf",))
+                save_figure(fig, run_dir / "sphere_histogram_final_null", formats=("pdf",))
                 plt.close(fig)
                 # Without decision boundaries
                 fig = make_s2_histogram_bar_figure(
@@ -1237,7 +1340,7 @@ def run_experiment_s2(config: RunConfig) -> None:
                     show_potential=config.gradient_mlp,
                     show_decision_boundaries=False,
                 )
-                save_figure(fig, run_dir / "sphere_histogram_mlp", formats=("pdf",))
+                save_figure(fig, run_dir / "sphere_histogram_final_mlp", formats=("pdf",))
                 plt.close(fig)
                 # With decision boundaries
                 fig = make_s2_histogram_bar_figure(
@@ -1247,7 +1350,7 @@ def run_experiment_s2(config: RunConfig) -> None:
                     show_potential=config.gradient_mlp,
                     show_decision_boundaries=True,
                 )
-                save_figure(fig, run_dir / "sphere_histogram_mlp_boundaries", formats=("pdf",))
+                save_figure(fig, run_dir / "sphere_histogram_final_mlp_boundaries", formats=("pdf",))
                 plt.close(fig)
                 if config.pdf_trajectory and example_null_hist is not None and example_null_times is not None:
                     # Linear scale
