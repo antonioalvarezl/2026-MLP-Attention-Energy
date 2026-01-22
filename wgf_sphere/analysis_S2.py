@@ -81,6 +81,50 @@ def cluster_max_spread_s2(points: np.ndarray, threshold: float) -> float:
     return max_spread
 
 
+def cluster_masses_s2(points: np.ndarray, threshold: float) -> np.ndarray:
+    """Return the mass (fraction of particles) in each cluster on S2, sorted descending."""
+    if points.size == 0:
+        return np.array([])
+    n = points.shape[0]
+    if threshold <= 0.0:
+        return np.ones(n) / n  # Each particle is its own cluster
+    if threshold >= np.pi:
+        return np.array([1.0])  # All particles in one cluster
+
+    norms = np.linalg.norm(points, axis=1, keepdims=True)
+    norms = np.where(norms > 0.0, norms, 1.0)
+    points = points / norms
+
+    chord = 2.0 * np.sin(0.5 * threshold)
+    tree = cKDTree(points)
+    neighbors = tree.query_ball_point(points, r=chord)
+
+    visited = np.zeros(n, dtype=bool)
+    sizes = []
+    for idx in range(n):
+        if visited[idx]:
+            continue
+        stack = [idx]
+        visited[idx] = True
+        size = 0
+        while stack:
+            current = stack.pop()
+            size += 1
+            for nbr in neighbors[current]:
+                if not visited[nbr]:
+                    visited[nbr] = True
+                    stack.append(nbr)
+        sizes.append(size)
+    masses = np.array(sizes, dtype=float) / n
+    return np.sort(masses)[::-1]  # Descending order
+
+
+def heaviest_cluster_mass_s2(points: np.ndarray, threshold: float) -> float:
+    """Return the mass (fraction of particles) in the largest cluster on S2."""
+    masses = cluster_masses_s2(points, threshold)
+    return float(masses[0]) if masses.size > 0 else 0.0
+
+
 def convergence_index_s2(points_hist: np.ndarray, threshold: float, window: int) -> int:
     total = points_hist.shape[0]
     if total == 0:

@@ -24,13 +24,14 @@ from wgf_circle.plotting import (
     save_figure,
 )
 
-from .analysis_S2 import cluster_count_s2, cluster_max_spread_s2, convergence_index_s2
+from .analysis_S2 import cluster_count_s2, cluster_masses_s2, cluster_max_spread_s2, convergence_index_s2, heaviest_cluster_mass_s2
 from .config_S2 import RunConfig, SeedPlan, build_seed_plan, load_config
 from .dynamics_S2 import (
     MLPConfig,
     MLPParams,
     SimulationConfig,
     attention_drift_particles_vectors,
+    compute_total_energy,
     mlp_drift_vectors,
     sample_mlp_params,
     sample_points_on_sphere,
@@ -39,7 +40,13 @@ from .dynamics_S2 import (
 )
 from .plotting_S2 import (
     SphereMeshCache,
+    compute_c_theta,
     create_sphere_mesh_cache,
+    make_all_masses_figure,
+    make_energy_figure,
+    make_energy_overlay_figure,
+    make_heaviest_mass_figure,
+    make_mlp_potential_surface_figure,
     make_s2_comparison_figure,
     make_s2_histogram_bar_figure,
     make_s2_histogram_comparison_figure,
@@ -591,6 +598,8 @@ def _write_run_summary(
     mlp_mode_counts: list[int],
     null_mass_counts: list[int],
     mlp_mass_counts: list[int],
+    null_cluster_masses: list[list[float]],
+    mlp_cluster_masses: list[list[float]],
     null_stop_reasons: list[str],
     mlp_stop_reasons: list[str],
     num_mlp_inits: int,
@@ -611,6 +620,15 @@ def _write_run_summary(
     positions_final_mlp: Optional[np.ndarray] = None,
     max_drift_final_null: Optional[list[float]] = None,
     max_drift_final_mlp: Optional[list[float]] = None,
+    heaviest_mass_null: Optional[float] = None,
+    heaviest_mass_mlp: Optional[float] = None,
+    energy_times_null: Optional[list[float]] = None,
+    energy_values_null: Optional[list[float]] = None,
+    energy_times_mlp: Optional[list[float]] = None,
+    energy_values_mlp: Optional[list[float]] = None,
+    mlp_a: Optional[list[list[float]]] = None,
+    mlp_omega: Optional[list[list[float]]] = None,
+    mlp_activation: Optional[str] = None,
 ) -> None:
     summary = {
         "beta": beta,
@@ -622,6 +640,8 @@ def _write_run_summary(
         "mlp_mode_counts": mlp_mode_counts,
         "null_mass_counts": null_mass_counts,
         "mlp_mass_counts": mlp_mass_counts,
+        "null_cluster_masses": null_cluster_masses,
+        "mlp_cluster_masses": mlp_cluster_masses,
         "null_stop_reasons": null_stop_reasons,
         "mlp_stop_reasons": mlp_stop_reasons,
         "num_mlp_inits": num_mlp_inits,
@@ -651,6 +671,25 @@ def _write_run_summary(
         summary["max_drift_final_null"] = max_drift_final_null
     if max_drift_final_mlp is not None:
         summary["max_drift_final_mlp"] = max_drift_final_mlp
+    # Add heaviest cluster mass
+    if heaviest_mass_null is not None:
+        summary["heaviest_mass_null"] = heaviest_mass_null
+    if heaviest_mass_mlp is not None:
+        summary["heaviest_mass_mlp"] = heaviest_mass_mlp
+    # Add energy data
+    if energy_times_null is not None and energy_values_null is not None:
+        summary["energy_times_null"] = energy_times_null
+        summary["energy_values_null"] = energy_values_null
+    if energy_times_mlp is not None and energy_values_mlp is not None:
+        summary["energy_times_mlp"] = energy_times_mlp
+        summary["energy_values_mlp"] = energy_values_mlp
+    # Add MLP params
+    if mlp_a is not None:
+        summary["mlp_a"] = mlp_a
+    if mlp_omega is not None:
+        summary["mlp_omega"] = mlp_omega
+    if mlp_activation is not None:
+        summary["mlp_activation"] = mlp_activation
     write_json(run_dir / "summary.json", summary, compact=False)
 
 
@@ -730,7 +769,7 @@ def _simulate_until_convergence_s2(
     progress_every: Optional[int] = None,
     save_history: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, int, str]:
-    """Simulate until convergence. If save_history=False, only keeps initial and final states."""
+    """Simulate until convergence. If save_history=False, keeps initial, middle, and final states."""
     x = x0.astype(np.float64, copy=True)
     times = [0.0]
     history = [x.copy()]
@@ -740,6 +779,10 @@ def _simulate_until_convergence_s2(
             progress_every = max(1, max_steps // 100)
         progress(0, max_steps)
 
+    # For save_history=False, we track snapshots at 25%, 50%, 75% to pick middle later
+    sparse_snapshots = []  # [(step, time, snapshot), ...]
+    last_saved_step = 0
+
     for step in range(1, max_steps + 1):
         x = step_positions(x, sim_config, mlp_params)
 
@@ -747,6 +790,10 @@ def _simulate_until_convergence_s2(
             if save_history:
                 times.append(step * sim_config.dt)
                 history.append(x.copy())
+            elif step - last_saved_step >= sim_config.save_every * 10:
+                # Save sparse snapshots periodically (every 10 save_every intervals)
+                sparse_snapshots.append((step, step * sim_config.dt, x.copy()))
+                last_saved_step = step
             count = cluster_count_s2(x, threshold)
             counts.append(count)
             max_spread = cluster_max_spread_s2(x, threshold)
@@ -759,7 +806,6 @@ def _simulate_until_convergence_s2(
                     sim_config.beta,
                     sim_config.attention_mode,
                     self_attention=sim_config.self_attention,
-                    ascending=sim_config.ascending,
                 )
                 if mlp_params is not None:
                     drift_check += mlp_drift_vectors(x, mlp_params)
@@ -769,6 +815,12 @@ def _simulate_until_convergence_s2(
                 if progress is not None:
                     progress(step, max_steps)
                 if not save_history:
+                    # Pick the middle snapshot from sparse_snapshots
+                    if sparse_snapshots:
+                        mid_idx = len(sparse_snapshots) // 2
+                        _, mid_time, mid_snap = sparse_snapshots[mid_idx]
+                        times.append(mid_time)
+                        history.append(mid_snap)
                     times.append(step * sim_config.dt)
                     history.append(x.copy())
                 return np.asarray(times), np.asarray(history), step, "convergence"
@@ -777,6 +829,12 @@ def _simulate_until_convergence_s2(
             progress(step, max_steps)
 
     if not save_history:
+        # Pick the middle snapshot from sparse_snapshots
+        if sparse_snapshots:
+            mid_idx = len(sparse_snapshots) // 2
+            _, mid_time, mid_snap = sparse_snapshots[mid_idx]
+            times.append(mid_time)
+            history.append(mid_snap)
         times.append(max_steps * sim_config.dt)
         history.append(x.copy())
     return np.asarray(times), np.asarray(history), max_steps, "max_steps"
@@ -915,6 +973,7 @@ def run_experiment_s2(config: RunConfig) -> None:
         null_stop_reasons = []
         null_cluster_times: list[Optional[float]] = []
         null_counts = []
+        null_cluster_masses: list[list[float]] = []
         null_did_not_converge = False
         example_initial = points0_list[0]
         example_null_final = None
@@ -961,7 +1020,20 @@ def run_experiment_s2(config: RunConfig) -> None:
                 null_cluster_times.append(
                     step_count * config.dt if stop_reason == "convergence" else None
                 )
-                print(f"  [null init {idx + 1}] stop_reason={stop_reason}")
+                final_points = points_hist[-1]
+                n_clusters = cluster_count_s2(final_points, threshold)
+                masses = cluster_masses_s2(final_points, threshold)
+                att_end = attention_drift_particles_vectors(
+                    final_points, beta, config.attention_mode, self_attention=config.self_attention
+                )
+                max_drift = float(np.max(np.linalg.norm(att_end, axis=1))) if att_end.size else 0.0
+                masses_str = ", ".join(f"{m:.3f}" for m in masses[:5])
+                if len(masses) > 5:
+                    masses_str += ", ..."
+                print(
+                    f"  [null init {idx + 1}] stop_reason={stop_reason}, "
+                    f"clusters={n_clusters}, masses=[{masses_str}], max|drift|={max_drift:.6e}"
+                )
 
                 # Count clusters immediately
                 if is_infinite:
@@ -969,12 +1041,16 @@ def run_experiment_s2(config: RunConfig) -> None:
                 else:
                     conv_idx = convergence_index_s2(points_hist, threshold, config.convergence_window)
                 null_counts.append(cluster_count_s2(points_hist[conv_idx], threshold))
+                masses_conv = cluster_masses_s2(points_hist[conv_idx], threshold)
+                null_cluster_masses.append(masses_conv.tolist())
 
                 # Only keep first history for example plots
                 if idx == 0:
                     example_null_final = points_hist[-1]
                     example_null_times = times
-                    example_null_hist = points_hist if need_full_history else None
+                    # For infinite sims with save_history=False, points_hist has [initial, middle, final]
+                    # which is small enough to keep for middle extraction
+                    example_null_hist = points_hist if (need_full_history or (is_infinite and len(points_hist) <= 4)) else None
                 # Discard history for non-first runs to save memory
                 del points_hist, times
 
@@ -1019,6 +1095,7 @@ def run_experiment_s2(config: RunConfig) -> None:
             mlp_counts = []
             mlp_stop_reasons = []
             mlp_cluster_times: list[Optional[float]] = []
+            mlp_cluster_masses: list[list[float]] = []
             example_mlp_final = None
             example_mlp_params = None
             example_mlp_times = None
@@ -1067,6 +1144,22 @@ def run_experiment_s2(config: RunConfig) -> None:
                     mlp_cluster_times.append(
                         step_count * config.dt if stop_reason == "convergence" else None
                     )
+                    final_points = points_hist[-1]
+                    n_clusters = cluster_count_s2(final_points, threshold)
+                    masses = cluster_masses_s2(final_points, threshold)
+                    att_end = attention_drift_particles_vectors(
+                        final_points, beta, config.attention_mode, self_attention=config.self_attention
+                    )
+                    mlp_end = mlp_drift_vectors(final_points, mlp_params)
+                    total_end = att_end + mlp_end
+                    max_drift = float(np.max(np.linalg.norm(total_end, axis=1))) if total_end.size else 0.0
+                    masses_str = ", ".join(f"{m:.3f}" for m in masses[:5])
+                    if len(masses) > 5:
+                        masses_str += ", ..."
+                    print(
+                        f"  [MLP {i + 1} init {j + 1}] stop_reason={stop_reason}, "
+                        f"clusters={n_clusters}, masses=[{masses_str}], max|drift|={max_drift:.6e}"
+                    )
                     
                     # Count clusters immediately
                     if is_infinite:
@@ -1074,12 +1167,16 @@ def run_experiment_s2(config: RunConfig) -> None:
                     else:
                         conv_idx = convergence_index_s2(points_hist, threshold, config.convergence_window)
                     mlp_counts.append(cluster_count_s2(points_hist[conv_idx], threshold))
+                    masses_conv = cluster_masses_s2(points_hist[conv_idx], threshold)
+                    mlp_cluster_masses.append(masses_conv.tolist())
                     
                     # Only keep first history for example plots
                     if i == 0 and j == 0:
                         example_mlp_final = points_hist[-1]
                         example_mlp_times = times
-                        example_mlp_hist = points_hist if need_full_history else None
+                        # For infinite sims with save_history=False, points_hist has [initial, middle, final]
+                        # which is small enough to keep for middle extraction
+                        example_mlp_hist = points_hist if (need_full_history or (is_infinite and len(points_hist) <= 4)) else None
                     # Discard history for non-first runs to save memory
                     del points_hist, times
 
@@ -1088,6 +1185,7 @@ def run_experiment_s2(config: RunConfig) -> None:
                 run_null_stop_reasons = []
                 run_null_cluster_times: list[Optional[float]] = []
                 run_null_counts = []
+                run_null_cluster_masses: list[list[float]] = []
                 for idx, points0 in enumerate(points0_list):
                     # Only save full history for first run if needed for GIFs
                     save_this_history = (idx == 0) and need_full_history
@@ -1113,17 +1211,34 @@ def run_experiment_s2(config: RunConfig) -> None:
                     run_null_steps.append(target_steps)
                     run_null_stop_reasons.append(stop_reason)
                     run_null_cluster_times.append(None)
-                    print(f"  [null init {idx + 1}] stop_reason={stop_reason}")
+                    final_points = points_hist[-1]
+                    n_clusters = cluster_count_s2(final_points, threshold)
+                    masses = cluster_masses_s2(final_points, threshold)
+                    att_end = attention_drift_particles_vectors(
+                        final_points, beta, config.attention_mode, self_attention=config.self_attention
+                    )
+                    max_drift = float(np.max(np.linalg.norm(att_end, axis=1))) if att_end.size else 0.0
+                    masses_str = ", ".join(f"{m:.3f}" for m in masses[:5])
+                    if len(masses) > 5:
+                        masses_str += ", ..."
+                    print(
+                        f"  [null init {idx + 1}] stop_reason={stop_reason}, "
+                        f"clusters={n_clusters}, masses=[{masses_str}], max|drift|={max_drift:.6e}"
+                    )
 
                     # Count clusters immediately
                     conv_idx = len(points_hist) - 1
                     run_null_counts.append(cluster_count_s2(points_hist[conv_idx], threshold))
+                    masses_conv = cluster_masses_s2(points_hist[conv_idx], threshold)
+                    run_null_cluster_masses.append(masses_conv.tolist())
 
                     # Only keep first history for example plots
                     if idx == 0:
                         example_null_final = points_hist[-1]
                         example_null_times = times
-                        example_null_hist = points_hist if need_full_history else None
+                        # When save_history=False, points_hist has [initial, middle, final]
+                        # which is small enough to keep for middle extraction
+                        example_null_hist = points_hist if (need_full_history or len(points_hist) <= 4) else None
                     # Discard history for non-first runs to save memory
                     del points_hist, times
 
@@ -1133,6 +1248,7 @@ def run_experiment_s2(config: RunConfig) -> None:
                 run_null_stop_reasons = null_stop_reasons
                 run_null_cluster_times = null_cluster_times
                 run_null_counts = null_counts
+                run_null_cluster_masses = null_cluster_masses
                 # example_null_* already set above
 
             actual_num_steps = max(all_steps) if (is_infinite and all_steps) else None
@@ -1149,6 +1265,11 @@ def run_experiment_s2(config: RunConfig) -> None:
                 actual_total_time=actual_total_time,
                 actual_mlp_scale=mlp_scale_eff,
             )
+            # Add MLP a and omega arrays if we have mlp_params
+            if mlp_params_list:
+                first_mlp = mlp_params_list[0]
+                params["mlp_a"] = first_mlp.a.tolist()
+                params["mlp_omega"] = first_mlp.omega.tolist()
             write_json(run_dir / "params.json", params, compact=False)
             run_seconds = time.perf_counter() - run_start
             
@@ -1170,7 +1291,6 @@ def run_experiment_s2(config: RunConfig) -> None:
                     beta,
                     sim_config.attention_mode,
                     self_attention=sim_config.self_attention,
-                    ascending=sim_config.ascending,
                 )
                 max_drift_null = float(np.max(np.linalg.norm(null_drift, axis=1)))
                 max_drift_null_list = [max_drift_null] if config.num_point_inits > 0 else []
@@ -1184,11 +1304,54 @@ def run_experiment_s2(config: RunConfig) -> None:
                     beta,
                     sim_config.attention_mode,
                     self_attention=sim_config.self_attention,
-                    ascending=sim_config.ascending,
                 )
                 total_drift_mlp = att_drift + mlp_drift
                 max_drift_mlp = float(np.max(np.linalg.norm(total_drift_mlp, axis=1)))
                 max_drift_mlp_list = [max_drift_mlp] if config.num_mlp_inits > 0 else []
+            
+            # Compute heaviest cluster mass at final time
+            heaviest_null = None
+            heaviest_mlp = None
+            if example_null_final is not None:
+                heaviest_null = heaviest_cluster_mass_s2(example_null_final, threshold)
+            if example_mlp_final is not None:
+                heaviest_mlp = heaviest_cluster_mass_s2(example_mlp_final, threshold)
+            
+            # Compute energy time series (for summary storage)
+            # If full history exists, compute full energy curve; otherwise compute initial/final only
+            energy_times_null = None
+            energy_values_null = None
+            energy_times_mlp = None
+            energy_values_mlp = None
+            if example_null_hist is not None and example_null_times is not None and len(example_null_hist) > 0:
+                energy_times_null = [float(t) for t in example_null_times]
+                energy_values_null = [float(compute_total_energy(pts, beta, None)) for pts in example_null_hist]
+            elif example_initial is not None and example_null_final is not None:
+                # Compute only initial and final energy
+                energy_times_null = [0.0, run_null_cluster_times[0] if run_null_cluster_times else 0.0]
+                energy_values_null = [
+                    float(compute_total_energy(example_initial, beta, None)),
+                    float(compute_total_energy(example_null_final, beta, None)),
+                ]
+            if example_mlp_hist is not None and example_mlp_times is not None and len(example_mlp_hist) > 0:
+                energy_times_mlp = [float(t) for t in example_mlp_times]
+                energy_values_mlp = [float(compute_total_energy(pts, beta, example_mlp_params)) for pts in example_mlp_hist]
+            elif example_initial is not None and example_mlp_final is not None:
+                # Compute only initial and final energy
+                energy_times_mlp = [0.0, mlp_cluster_times[0] if mlp_cluster_times else 0.0]
+                energy_values_mlp = [
+                    float(compute_total_energy(example_initial, beta, example_mlp_params)),
+                    float(compute_total_energy(example_mlp_final, beta, example_mlp_params)),
+                ]
+            
+            # Extract MLP params for summary
+            mlp_a_list = None
+            mlp_omega_list = None
+            mlp_activation_str = None
+            if example_mlp_params is not None:
+                mlp_a_list = example_mlp_params.a.tolist()
+                mlp_omega_list = example_mlp_params.omega.tolist()
+                mlp_activation_str = example_mlp_params.activation
             
             _write_run_summary(
                 run_dir,
@@ -1200,6 +1363,8 @@ def run_experiment_s2(config: RunConfig) -> None:
                 [],
                 [],
                 [],
+                run_null_cluster_masses,
+                mlp_cluster_masses,
                 run_null_stop_reasons,
                 mlp_stop_reasons,
                 config.num_mlp_inits,
@@ -1219,6 +1384,15 @@ def run_experiment_s2(config: RunConfig) -> None:
                 positions_final_mlp=example_mlp_final,
                 max_drift_final_null=max_drift_null_list if max_drift_null_list else None,
                 max_drift_final_mlp=max_drift_mlp_list if max_drift_mlp_list else None,
+                heaviest_mass_null=heaviest_null,
+                heaviest_mass_mlp=heaviest_mlp,
+                energy_times_null=energy_times_null,
+                energy_values_null=energy_values_null,
+                energy_times_mlp=energy_times_mlp,
+                energy_values_mlp=energy_values_mlp,
+                mlp_a=mlp_a_list,
+                mlp_omega=mlp_omega_list,
+                mlp_activation=mlp_activation_str,
             )
 
             if example_mlp_final is not None:
@@ -1229,6 +1403,20 @@ def run_experiment_s2(config: RunConfig) -> None:
                         example_mlp_params.omega,
                         example_mlp_params.activation,
                     )
+                # Create subdirectories
+                sphere_dir = run_dir / "sphere"
+                hist_dir = run_dir / "hist"
+                sphere_dir.mkdir(exist_ok=True)
+                hist_dir.mkdir(exist_ok=True)
+                
+                import matplotlib.pyplot as plt
+
+                if potential_params is not None:
+                    fig = make_mlp_potential_surface_figure(*potential_params)
+                    save_figure(fig, sphere_dir / "mlp_potential", formats=("pdf",))
+                    plt.close(fig)
+                
+                # ---------- SPHERE figures at initial, middle, final ----------
                 fig = make_s2_single_figure(
                     example_initial,
                     NULL_COLOR,
@@ -1236,9 +1424,7 @@ def run_experiment_s2(config: RunConfig) -> None:
                     show_potential=False,
                     point_size=10.0,
                 )
-                save_figure(fig, run_dir / "sphere_init_null", formats=("pdf",))
-                import matplotlib.pyplot as plt
-
+                save_figure(fig, sphere_dir / "init_null", formats=("pdf",))
                 plt.close(fig)
                 fig = make_s2_single_figure(
                     example_initial,
@@ -1247,7 +1433,7 @@ def run_experiment_s2(config: RunConfig) -> None:
                     show_potential=config.gradient_mlp,
                     point_size=10.0,
                 )
-                save_figure(fig, run_dir / "sphere_init_mlp", formats=("pdf",))
+                save_figure(fig, sphere_dir / "init_mlp", formats=("pdf",))
                 plt.close(fig)
                 # mid_null and mid_mlp already computed before _write_run_summary
                 fig = make_s2_single_figure(
@@ -1257,7 +1443,7 @@ def run_experiment_s2(config: RunConfig) -> None:
                     show_potential=False,
                     point_size=10.0,
                 )
-                save_figure(fig, run_dir / "sphere_middle_null", formats=("pdf",))
+                save_figure(fig, sphere_dir / "middle_null", formats=("pdf",))
                 plt.close(fig)
                 fig = make_s2_single_figure(
                     mid_mlp,
@@ -1266,7 +1452,7 @@ def run_experiment_s2(config: RunConfig) -> None:
                     show_potential=config.gradient_mlp,
                     point_size=10.0,
                 )
-                save_figure(fig, run_dir / "sphere_middle_mlp", formats=("pdf",))
+                save_figure(fig, sphere_dir / "middle_mlp", formats=("pdf",))
                 plt.close(fig)
                 fig = make_s2_single_figure(
                     example_null_final,
@@ -1275,7 +1461,7 @@ def run_experiment_s2(config: RunConfig) -> None:
                     show_potential=False,
                     point_size=10.0,
                 )
-                save_figure(fig, run_dir / "sphere_final_null", formats=("pdf",))
+                save_figure(fig, sphere_dir / "final_null", formats=("pdf",))
                 plt.close(fig)
                 fig = make_s2_single_figure(
                     example_mlp_final,
@@ -1284,7 +1470,7 @@ def run_experiment_s2(config: RunConfig) -> None:
                     show_potential=config.gradient_mlp,
                     point_size=10.0,
                 )
-                save_figure(fig, run_dir / "sphere_final_mlp", formats=("pdf",))
+                save_figure(fig, sphere_dir / "final_mlp", formats=("pdf",))
                 plt.close(fig)
                 # ---------- HISTOGRAMS at initial, middle, final ----------
                 # Initial histograms
@@ -1294,7 +1480,7 @@ def run_experiment_s2(config: RunConfig) -> None:
                     potential_params=None,
                     show_potential=False,
                 )
-                save_figure(fig, run_dir / "sphere_histogram_init_null", formats=("pdf",))
+                save_figure(fig, hist_dir / "init_null", formats=("pdf",))
                 plt.close(fig)
                 fig = make_s2_histogram_bar_figure(
                     example_initial,
@@ -1303,7 +1489,7 @@ def run_experiment_s2(config: RunConfig) -> None:
                     show_potential=config.gradient_mlp,
                     show_decision_boundaries=False,
                 )
-                save_figure(fig, run_dir / "sphere_histogram_init_mlp", formats=("pdf",))
+                save_figure(fig, hist_dir / "init_mlp", formats=("pdf",))
                 plt.close(fig)
                 # Middle histograms
                 fig = make_s2_histogram_bar_figure(
@@ -1312,7 +1498,7 @@ def run_experiment_s2(config: RunConfig) -> None:
                     potential_params=None,
                     show_potential=False,
                 )
-                save_figure(fig, run_dir / "sphere_histogram_middle_null", formats=("pdf",))
+                save_figure(fig, hist_dir / "middle_null", formats=("pdf",))
                 plt.close(fig)
                 fig = make_s2_histogram_bar_figure(
                     mid_mlp,
@@ -1321,7 +1507,7 @@ def run_experiment_s2(config: RunConfig) -> None:
                     show_potential=config.gradient_mlp,
                     show_decision_boundaries=False,
                 )
-                save_figure(fig, run_dir / "sphere_histogram_middle_mlp", formats=("pdf",))
+                save_figure(fig, hist_dir / "middle_mlp", formats=("pdf",))
                 plt.close(fig)
                 # Final histograms
                 fig = make_s2_histogram_bar_figure(
@@ -1330,7 +1516,7 @@ def run_experiment_s2(config: RunConfig) -> None:
                     potential_params=None,
                     show_potential=False,
                 )
-                save_figure(fig, run_dir / "sphere_histogram_final_null", formats=("pdf",))
+                save_figure(fig, hist_dir / "final_null", formats=("pdf",))
                 plt.close(fig)
                 # Without decision boundaries
                 fig = make_s2_histogram_bar_figure(
@@ -1340,7 +1526,7 @@ def run_experiment_s2(config: RunConfig) -> None:
                     show_potential=config.gradient_mlp,
                     show_decision_boundaries=False,
                 )
-                save_figure(fig, run_dir / "sphere_histogram_final_mlp", formats=("pdf",))
+                save_figure(fig, hist_dir / "final_mlp", formats=("pdf",))
                 plt.close(fig)
                 # With decision boundaries
                 fig = make_s2_histogram_bar_figure(
@@ -1350,7 +1536,7 @@ def run_experiment_s2(config: RunConfig) -> None:
                     show_potential=config.gradient_mlp,
                     show_decision_boundaries=True,
                 )
-                save_figure(fig, run_dir / "sphere_histogram_final_mlp_boundaries", formats=("pdf",))
+                save_figure(fig, hist_dir / "final_mlp_boundaries", formats=("pdf",))
                 plt.close(fig)
                 if config.pdf_trajectory and example_null_hist is not None and example_null_times is not None:
                     # Linear scale
@@ -1360,7 +1546,7 @@ def run_experiment_s2(config: RunConfig) -> None:
                         NULL_COLOR,
                         time_scale="linear",
                     )
-                    save_figure(fig, run_dir / "sphere_trajectory_null", formats=("pdf",))
+                    save_figure(fig, sphere_dir / "trajectory_null", formats=("pdf",))
                     plt.close(fig)
                     # Log scale
                     fig = make_s2_trajectory_figure(
@@ -1369,7 +1555,7 @@ def run_experiment_s2(config: RunConfig) -> None:
                         NULL_COLOR,
                         time_scale="log",
                     )
-                    save_figure(fig, run_dir / "sphere_trajectory_null_log", formats=("pdf",))
+                    save_figure(fig, sphere_dir / "trajectory_null_log", formats=("pdf",))
                     plt.close(fig)
                 if config.pdf_trajectory and example_mlp_hist is not None and example_mlp_times is not None:
                     # Linear scale
@@ -1379,7 +1565,7 @@ def run_experiment_s2(config: RunConfig) -> None:
                         mlp_color,
                         time_scale="linear",
                     )
-                    save_figure(fig, run_dir / "sphere_trajectory_mlp", formats=("pdf",))
+                    save_figure(fig, sphere_dir / "trajectory_mlp", formats=("pdf",))
                     plt.close(fig)
                     # Log scale
                     fig = make_s2_trajectory_figure(
@@ -1388,8 +1574,45 @@ def run_experiment_s2(config: RunConfig) -> None:
                         mlp_color,
                         time_scale="log",
                     )
-                    save_figure(fig, run_dir / "sphere_trajectory_mlp_log", formats=("pdf",))
+                    save_figure(fig, sphere_dir / "trajectory_mlp_log", formats=("pdf",))
                     plt.close(fig)
+                
+                # ---------- ENERGY plots ----------
+                if example_null_hist is not None and example_mlp_hist is not None:
+                    # Compute energy for each time step
+                    energy_null = np.array([
+                        compute_total_energy(pts, beta, None)
+                        for pts in example_null_hist
+                    ])
+                    energy_mlp = np.array([
+                        compute_total_energy(pts, beta, example_mlp_params)
+                        for pts in example_mlp_hist
+                    ])
+                    # Linear scale
+                    fig = make_energy_figure(
+                        example_null_times,
+                        energy_null,
+                        example_mlp_times,
+                        energy_mlp,
+                        NULL_COLOR,
+                        mlp_color,
+                        time_scale="linear",
+                    )
+                    save_figure(fig, run_dir / "energy", formats=("pdf",))
+                    plt.close(fig)
+                    # Log scale
+                    fig = make_energy_figure(
+                        example_null_times,
+                        energy_null,
+                        example_mlp_times,
+                        energy_mlp,
+                        NULL_COLOR,
+                        mlp_color,
+                        time_scale="log",
+                    )
+                    save_figure(fig, run_dir / "energy_log", formats=("pdf",))
+                    plt.close(fig)
+                
                 # Interactive HTML with both MLP and null views
                 write_s2_interactive_html(
                     run_dir / "sphere_views.html",
@@ -1511,8 +1734,10 @@ def run_experiment_s2(config: RunConfig) -> None:
     summaries = _load_run_summaries(experiment_dir, expected_params)
     if summaries:
         sqrt_betas = np.asarray([float(np.sqrt(float(entry["beta"]))) for entry in summaries])
+        betas = np.asarray([float(entry["beta"]) for entry in summaries])
         order = np.argsort(sqrt_betas)
         sqrt_betas = sqrt_betas[order]
+        betas_sorted = betas[order]
         null_counts = [entry.get("null_counts", []) for entry in summaries]
         mlp_counts = [entry.get("mlp_counts", []) for entry in summaries]
 
@@ -1547,6 +1772,184 @@ def run_experiment_s2(config: RunConfig) -> None:
         )
         save_figure(fig, stats_dir / "cluster_count_with_null", formats=("pdf",))
         plt.close(fig)
+        
+        # ---------- Heaviest cluster mass plot ----------
+        heaviest_null_list = []
+        heaviest_mlp_list = []
+        smallest_mlp_list = []
+        mlp_a = None
+        mlp_omega = None
+        mlp_activation = None
+
+        def _smallest_non_spurious(masses, params_json: Optional[str]) -> float:
+            if masses is None:
+                return float("nan")
+            try:
+                masses_arr = np.asarray(masses, dtype=float)
+            except Exception:
+                return float("nan")
+            if masses_arr.ndim > 1:
+                masses_arr = masses_arr[0]
+            if masses_arr.size == 0:
+                return float("nan")
+            mass_threshold = 0.0
+            n_particles = 0
+            if params_json:
+                try:
+                    params = json.loads(params_json)
+                    mass_threshold = float(params.get("mass_threshold", 0.0))
+                    n_particles = int(params.get("n_particles", 0))
+                except Exception:
+                    pass
+            min_mass = mass_threshold
+            if n_particles > 0:
+                min_mass = max(min_mass, 1.0 / n_particles)
+            valid = masses_arr[masses_arr >= min_mass]
+            if valid.size == 0:
+                return float("nan")
+            return float(np.min(valid))
+        
+        for idx in order:
+            entry = summaries[idx]
+            h_null = entry.get("heaviest_mass_null")
+            h_mlp = entry.get("heaviest_mass_mlp")
+            heaviest_null_list.append(h_null if h_null is not None else np.nan)
+            heaviest_mlp_list.append(h_mlp if h_mlp is not None else np.nan)
+            masses_list = entry.get("mlp_cluster_masses")
+            masses = None
+            if isinstance(masses_list, list) and masses_list:
+                masses = masses_list[0]
+            smallest_mlp_list.append(_smallest_non_spurious(masses, entry.get("params_json")))
+
+            if mlp_a is None and mlp_omega is None and mlp_activation is None:
+                mlp_a_raw = entry.get("mlp_a")
+                mlp_omega_raw = entry.get("mlp_omega")
+                mlp_activation = entry.get("mlp_activation")
+                if mlp_a_raw is not None and mlp_omega_raw is not None:
+                    mlp_a = np.array(mlp_a_raw)
+                    mlp_omega = np.array(mlp_omega_raw)
+            
+            # Get MLP params from params.json (via summary's run_dir)
+            if mlp_a is None and mlp_omega is None and mlp_activation is None:
+                run_dir_str = entry.get("run_dir")
+                if run_dir_str:
+                    params_path = Path(run_dir_str) / "params.json"
+                    if params_path.exists():
+                        try:
+                            params_data = json.loads(params_path.read_text(encoding="utf-8"))
+                            mlp_a_raw = params_data.get("mlp_a")
+                            mlp_omega_raw = params_data.get("mlp_omega")
+                            mlp_activation = params_data.get("activation")
+                            if mlp_a_raw is not None and mlp_omega_raw is not None:
+                                mlp_a = np.array(mlp_a_raw)
+                                mlp_omega = np.array(mlp_omega_raw)
+                        except Exception:
+                            pass
+        
+        heaviest_null_arr = np.array(heaviest_null_list)
+        heaviest_mlp_arr = np.array(heaviest_mlp_list)
+        smallest_mlp_arr = np.array(smallest_mlp_list)
+        
+        fig = make_heaviest_mass_figure(
+            betas_sorted,
+            heaviest_null_arr,
+            heaviest_mlp_arr,
+            smallest_mlp=smallest_mlp_arr,
+            mlp_a=mlp_a,
+            mlp_omega=mlp_omega,
+            mlp_activation=mlp_activation,
+            null_color=NULL_COLOR,
+            mlp_color=MLP_COLOR,
+        )
+        save_figure(fig, stats_dir / "heaviest_mass", formats=("pdf",))
+        plt.close(fig)
+
+        # ---------- All cluster masses plot ----------
+        all_masses_list = []
+        for idx in order:
+            entry = summaries[idx]
+            masses_list = entry.get("mlp_cluster_masses")
+            masses_flat: list[float] = []
+            if isinstance(masses_list, list):
+                for masses in masses_list:
+                    try:
+                        masses_flat.extend(float(m) for m in masses)
+                    except Exception:
+                        continue
+            if not masses_flat:
+                positions = entry.get("positions_final_mlp")
+                params_json = entry.get("params_json")
+                if positions is not None and params_json:
+                    try:
+                        params = json.loads(params_json)
+                        cluster_scale = params.get("cluster_scale")
+                        beta_val = float(entry["beta"])
+                        if cluster_scale is not None and beta_val > 0.0:
+                            threshold = cluster_threshold(beta_val, float(cluster_scale))
+                            masses_flat = cluster_masses_s2(
+                                np.asarray(positions, dtype=np.float64),
+                                threshold,
+                            ).tolist()
+                    except Exception:
+                        masses_flat = []
+            all_masses_list.append(masses_flat)
+
+        fig = make_all_masses_figure(
+            betas_sorted,
+            all_masses_list,
+            mlp_a=mlp_a,
+            mlp_omega=mlp_omega,
+            mlp_activation=mlp_activation,
+            mlp_color=MLP_COLOR,
+        )
+        save_figure(fig, stats_dir / "all_masses", formats=("pdf",))
+        plt.close(fig)
+        
+        # ---------- Energy overlay plot ----------
+        # Collect energy data from all summaries
+        energy_data = []
+        for idx in order:
+            entry = summaries[idx]
+            e_times_null = entry.get("energy_times_null")
+            e_vals_null = entry.get("energy_values_null")
+            e_times_mlp = entry.get("energy_times_mlp")
+            e_vals_mlp = entry.get("energy_values_mlp")
+            
+            if e_times_null is not None and e_vals_null is not None:
+                energy_data.append({
+                    "beta": entry["beta"],
+                    "times_null": e_times_null,
+                    "energy_null": e_vals_null,
+                    "times_mlp": e_times_mlp if e_times_mlp else [],
+                    "energy_mlp": e_vals_mlp if e_vals_mlp else [],
+                })
+        
+        if energy_data:
+            # Generate colors for each beta - use a colormap
+            n_betas = len(energy_data)
+            cmap = plt.cm.viridis
+            colors = [cmap(i / max(1, n_betas - 1)) for i in range(n_betas)]
+            colors_hex = ['#%02x%02x%02x' % (int(c[0]*255), int(c[1]*255), int(c[2]*255)) for c in colors]
+            
+            # Linear scale - without legend
+            fig = make_energy_overlay_figure(energy_data, colors_hex, time_scale="linear", show_legend=False)
+            save_figure(fig, stats_dir / "energy_overlay", formats=("pdf",))
+            plt.close(fig)
+            
+            # Linear scale - with legend
+            fig = make_energy_overlay_figure(energy_data, colors_hex, time_scale="linear", show_legend=True)
+            save_figure(fig, stats_dir / "energy_overlay_legend", formats=("pdf",))
+            plt.close(fig)
+            
+            # Log scale - without legend
+            fig = make_energy_overlay_figure(energy_data, colors_hex, time_scale="log", show_legend=False)
+            save_figure(fig, stats_dir / "energy_overlay_log", formats=("pdf",))
+            plt.close(fig)
+            
+            # Log scale - with legend
+            fig = make_energy_overlay_figure(energy_data, colors_hex, time_scale="log", show_legend=True)
+            save_figure(fig, stats_dir / "energy_overlay_log_legend", formats=("pdf",))
+            plt.close(fig)
 
 
 def main(config_path: Optional[Path] = None) -> None:

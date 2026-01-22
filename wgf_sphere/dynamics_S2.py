@@ -120,7 +120,6 @@ def _attention_drift_vectors(
     beta: float,
     mode: AttentionMode,
     self_attention: bool,
-    ascending: bool,
 ) -> NDArray[np.float64]:
     dots = x_eval @ x_particles.T
     log_w = beta * (dots - 1.0)
@@ -134,13 +133,12 @@ def _attention_drift_vectors(
     weighted_sum = weights @ x_particles
     dot_sum = (weights * dots).sum(axis=1, keepdims=True)
     numerator = dot_sum * x_eval - weighted_sum
-    sign = -1.0 if ascending else 1.0
 
     if mode == "normalized":
         denom = np.maximum(weights.sum(axis=1, keepdims=True), 1e-12)
-        return sign * numerator / denom
+        return numerator / denom
 
-    return sign * numerator / max(1, x_particles.shape[0])
+    return numerator / max(1, x_particles.shape[0])
 
 
 def attention_drift_particles_vectors(
@@ -148,7 +146,6 @@ def attention_drift_particles_vectors(
     beta: float,
     mode: AttentionMode,
     self_attention: bool = False,
-    ascending: bool = False,
 ) -> NDArray[np.float64]:
     """Compute self-attention drift on S^{d-1} for vector positions."""
     effective_self_attention = self_attention or mode == "normalized"
@@ -158,17 +155,20 @@ def attention_drift_particles_vectors(
         beta,
         mode,
         effective_self_attention,
-        ascending,
     )
 
 
 def mlp_drift_vectors(x: NDArray[np.float64], params: MLPParams) -> NDArray[np.float64]:
-    """Compute the MLP drift contribution as a tangent vector field."""
+    """Compute the MLP drift contribution as a tangent vector field.
+    
+    Returns -∇E_mlp (negative gradient of MLP energy), consistent with
+    attention_drift which also returns -∇E_att.
+    """
     z = x @ params.a.T
     act = _activation(z, params.activation)
     v = act @ params.omega
     dot = np.einsum("ij,ij->i", v, x)
-    return v - dot[:, None] * x
+    return (v - dot[:, None] * x)
 
 
 def _total_drift_vectors(
@@ -181,10 +181,13 @@ def _total_drift_vectors(
         sim_config.beta,
         sim_config.attention_mode,
         self_attention=sim_config.self_attention,
-        ascending=sim_config.ascending,
     )
     if mlp_params is not None:
         drift += mlp_drift_vectors(x, mlp_params)
+    # Treat the raw attention + MLP fields as the ascending direction.
+    # For gradient descent (ascending=False): negate the total field.
+    if not sim_config.ascending:
+        drift = -drift
     return drift
 
 
@@ -228,7 +231,7 @@ def simulate_positions(
 ) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Run integration and return (times, position_history).
     
-    If save_history=False, only returns initial and final states to save memory.
+    If save_history=False, returns initial, middle, and final states to save memory.
     """
     x = _normalize_rows(x0.astype(np.float64, copy=True))
 
@@ -236,7 +239,7 @@ def simulate_positions(
         times = [0.0]
         history = [x.copy()]
     else:
-        # Only keep initial state, will add final at the end
+        # Only keep initial state, will add middle and final at the end
         times = [0.0]
         history = [x.copy()]
 
@@ -245,19 +248,106 @@ def simulate_positions(
             progress_every = max(1, sim_config.num_steps // 100)
         progress(0, sim_config.num_steps)
 
+    # For save_history=False, track middle snapshot
+    mid_step = sim_config.num_steps // 2
+    mid_snapshot = None
+    mid_time = None
+
     for step in range(1, sim_config.num_steps + 1):
         x = step_positions(x, sim_config, mlp_params)
 
         if save_history and (step % sim_config.save_every == 0 or step == sim_config.num_steps):
             times.append(step * sim_config.dt)
             history.append(x.copy())
+        elif not save_history and step == mid_step:
+            # Save middle snapshot
+            mid_snapshot = x.copy()
+            mid_time = step * sim_config.dt
 
         if progress is not None and (step % progress_every == 0 or step == sim_config.num_steps):
             progress(step, sim_config.num_steps)
 
     if not save_history:
-        # Only add final state
+        # Add middle state (if we captured one)
+        if mid_snapshot is not None:
+            times.append(mid_time)
+            history.append(mid_snapshot)
+        # Add final state
         times.append(sim_config.num_steps * sim_config.dt)
         history.append(x.copy())
 
     return np.asarray(times), np.asarray(history)
+
+
+def _activation_primitive(z: NDArray[np.float64], activation: Activation) -> NDArray[np.float64]:
+    """Compute primitive φ such that φ'(s) = 2σ(s).
+    
+    For ReLU: σ(s) = max(0, s), so φ(s) = max(0, s)² = s² for s > 0, 0 otherwise.
+    For GELU: σ(s) = s·Φ(s/√2), so φ(s) = s²·Φ(s/√2) + s·φ(s/√2)/√(2π) where φ is standard normal pdf.
+    """
+    if activation == "relu":
+        return np.maximum(z, 0.0) ** 2
+    if activation == "gelu":
+        # φ'(s) = 2·GELU(s) = s·(1 + erf(s/√2))
+        # φ(s) = (s²/2)·(1 + erf(s/√2)) + s·exp(-s²/2)/(√(2π))
+        sqrt2 = np.sqrt(2.0)
+        erf_term = 0.5 * (1.0 + erf(z / sqrt2))
+        pdf_term = np.exp(-0.5 * z ** 2) / np.sqrt(2.0 * np.pi)
+        return z ** 2 * erf_term + z * pdf_term
+    raise ValueError(f"Unsupported activation: {activation}")
+
+
+def compute_energy_attention(
+    x: NDArray[np.float64],
+    beta: float,
+) -> float:
+    """Compute attention energy: E_β[μ] = (1/2β) ∫∫ exp(β(x·y - 1)) dμ(x)dμ(y).
+    
+    For empirical measure with N particles: (1/2β) · (1/N²) Σᵢⱼ exp(β(xᵢ·xⱼ - 1))
+    The factor exp(-β) comes from using exp(β(x·y-1)) instead of exp(βx·y) for numerical stability.
+    """
+    n = x.shape[0]
+    dots = x @ x.T  # (n, n) matrix of dot products
+    weights = np.exp(beta * (dots - 1.0))  # exp(β(x·y - 1)) ∈ (0, 1]
+    return float(np.sum(weights)) / (2.0 * beta * n * n)
+
+
+def compute_energy_mlp(
+    x: NDArray[np.float64],
+    params: MLPParams,
+) -> float:
+    """Compute MLP potential energy: (1/2) ∫ v_θ(x) dμ(x).
+    
+    Where v_θ(x) = Σⱼ ωⱼ φ(aⱼ·x) and φ'(s) = 2σ(s).
+    For gradient MLP: ω_j is a scalar (omega[j] = s_j * a_j, so ω_j = ||omega[j]|| with sign).
+    """
+    z = x @ params.a.T  # (n, k) where k = n_units
+    phi = _activation_primitive(z, params.activation)  # (n, k)
+    
+    # omega has shape (k, d). For gradient MLP, omega[j] = s_j * a[j].
+    # The scalar ω_j = sign(s_j) * ||omega[j]|| = omega[j] · a[j] (since a is unit)
+    omega_scalar = np.sum(params.omega * params.a, axis=1)  # (k,)
+    
+    # v_θ(x) = Σⱼ ω_j φ(a_j·x)
+    v = phi @ omega_scalar  # (n,)
+    
+    n = x.shape[0]
+    return float(np.sum(v)) / (2.0 * n)
+
+
+def compute_total_energy(
+    x: NDArray[np.float64],
+    beta: float,
+    mlp_params: Optional[MLPParams] = None,
+) -> float:
+    """Compute total energy for the gradient flow.
+    
+    E_{β,θ}[μ] = (1/2β)∫∫e^{β(x·y-1)}dμdμ + (1/2)∫v_θ(x)dμ
+    
+    The drift is ∇E (gradient ascent) or -∇E (gradient descent).
+    Energy should decrease along gradient descent flow.
+    """
+    energy = compute_energy_attention(x, beta)
+    if mlp_params is not None:
+        energy += compute_energy_mlp(x, mlp_params)
+    return energy
