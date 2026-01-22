@@ -32,8 +32,8 @@ are defined in `wgf_circle/config.py` (d=2) and `wgf_sphere/config_S2.py` (d=3).
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `attention_mode` | string | `"unnormalized"` | `"unnormalized"` (USA) or `"normalized"` (SA) |
-| `self_attention` | bool | false | Include j=i term in USA. Always true for SA |
-| `ascending` | bool | false | If true, gradient ascent (s=-1); if false, gradient descent (s=+1) |
+| `self_attention` | bool | false | Include j=i term in USA. Forced on when `attention_mode="normalized"` |
+| `ascending` | bool | false | If true, uses the raw attention+MLP field (gradient ascent). If false, flips the total field (gradient descent) |
 
 ---
 
@@ -82,7 +82,7 @@ Seeds are derived deterministically when multiple initializations are used.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `k_max` | int ≥ 0 | 20 | Maximum k for gamma spectrum (S¹) and convergence plots |
-| `cluster_scale` | float > 0 | 1.0 | Clustering threshold = `cluster_scale / sqrt(beta)` |
+| `cluster_scale` | float > 0 | 1.0 | Clustering threshold = `cluster_scale / sqrt(beta)` (S¹ cap at `π/20`) |
 | `mass_threshold` | float ∈ [0,1] | 0.0 | Minimum mass fraction for cluster counting |
 | `convergence_window` | int > 0 | 5 | Consecutive snapshots with same cluster count to declare convergence |
 | `convergence_drift_tol` | float ≥ 0 | 1e-3 | Max drift magnitude for convergence (0 disables) |
@@ -100,7 +100,7 @@ When `total_time="inf"`, simulation stops at convergence or `max_steps`.
 | `experiment_dir` | string or null | null | Specific experiment folder. If null, creates timestamped folder. Set to resume interrupted runs |
 | `plot_interval` | float > 0 | 0.1 | Time interval between GIF frames |
 | `output_frame_limit` | int > 0 | 400 | Maximum frames for GIFs. Exceeded → skip GIF generation |
-| `mlp0_output_frame_limit` | int or null | null | Frame limit for MLP=0 (null uses `output_frame_limit`) |
+| `mlp0_output_frame_limit` | int or null | null | Frame limit for MLP=0 (S² only; null uses `output_frame_limit`) |
 
 ---
 
@@ -108,9 +108,9 @@ When `total_time="inf"`, simulation stops at convergence or `max_steps`.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `gif_sphere` | bool | true | Generate sphere/circle evolution GIFs |
-| `gif_histogram` | bool | true (S²) / false (S¹) | Generate histogram GIFs |
-| `pdf_trajectory` | bool | true | Generate trajectory PDF plots. Set false to save memory |
+| `gif_sphere` | bool | true | Generate evolution GIFs (circle for S¹, sphere for S²) |
+| `gif_histogram` | bool | true (S²) / false (S¹) | Generate histogram GIFs (S² only) |
+| `pdf_trajectory` | bool | true | Generate trajectory PDF plots (S² only). Set false to save memory |
 | `sphere_gif_rotations` | float | 1.0 | Number of full rotations during sphere GIF (S² only) |
 
 ### Memory Optimization
@@ -125,7 +125,7 @@ For large simulations, disable outputs you don't need:
 }
 ```
 
-This prevents storing full simulation histories, dramatically reducing memory usage.
+This prevents storing full simulation histories (especially for S²), dramatically reducing memory usage.
 
 ---
 
