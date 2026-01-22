@@ -95,10 +95,9 @@ def _attention_drift(
     beta: float,
     mode: AttentionMode,
     self_attention: bool,
-    ascending: bool,
 ) -> NDArray[np.float64]:
 
-    diff = theta_eval[:, None] - theta_particles[None, :]
+    diff = theta_particles[None, :] - theta_eval[:, None]
     sin_diff = np.sin(diff)
     cos_diff = np.cos(diff)
 
@@ -113,13 +112,12 @@ def _attention_drift(
         np.fill_diagonal(weights, 0.0)
 
     numerator = (weights * sin_diff).sum(axis=1)
-    sign = -1.0 if ascending else 1.0
 
     if mode == "normalized":
         denom = np.maximum(weights.sum(axis=1), 1e-12)
-        return sign * numerator / denom
+        return numerator / denom
 
-    return sign * numerator / max(1, theta_particles.size)
+    return numerator / max(1, theta_particles.size)
 
 
 def attention_drift_particles(
@@ -127,7 +125,6 @@ def attention_drift_particles(
     beta: float,
     mode: AttentionMode,
     self_attention: bool = False,
-    ascending: bool = False,
 ) -> NDArray[np.float64]:
     """Compute the self-attention drift on S1 (USA/SA model in angle form)."""
     effective_self_attention = self_attention or mode == "normalized"
@@ -137,7 +134,6 @@ def attention_drift_particles(
         beta,
         mode,
         effective_self_attention,
-        ascending,
     )
 
 
@@ -146,7 +142,6 @@ def attention_drift_at(
     theta_particles: NDArray[np.float64],
     beta: float,
     mode: AttentionMode,
-    ascending: bool = False,
 ) -> NDArray[np.float64]:
     """Evaluate attention drift at arbitrary angles against a particle set."""
     return _attention_drift(
@@ -155,12 +150,14 @@ def attention_drift_at(
         beta,
         mode,
         self_attention=True,
-        ascending=ascending,
     )
 
 
 def mlp_drift(theta: NDArray[np.float64], params: MLPParams) -> NDArray[np.float64]:
-    """Compute the MLP drift contribution as an angular velocity."""
+    """Compute the MLP drift contribution as an angular velocity.
+
+    Returns the tangential component of v_theta at each angle.
+    """
     x = np.stack([np.cos(theta), np.sin(theta)], axis=1)
     t = np.stack([-np.sin(theta), np.cos(theta)], axis=1)
 
@@ -211,10 +208,11 @@ def _total_drift(
         sim_config.beta,
         sim_config.attention_mode,
         self_attention=sim_config.self_attention,
-        ascending=sim_config.ascending,
     )
     if mlp_params is not None:
         drift += mlp_drift(theta, mlp_params)
+    if not sim_config.ascending:
+        drift = -drift
     return drift
 
 
@@ -241,3 +239,77 @@ def step_theta(
     else:
         raise ValueError(f"Unknown integrator: {sim_config.integrator}")
     return np.mod(theta_next, TWO_PI)
+
+
+def _activation_primitive(z: NDArray[np.float64], activation: Activation) -> NDArray[np.float64]:
+    """Compute primitive φ such that φ'(s) = 2σ(s).
+    
+    For ReLU: σ(s) = max(0, s), so φ(s) = max(0, s)² = s² for s > 0, 0 otherwise.
+    For GELU: σ(s) = s·Φ(s/√2), so φ(s) = s²·Φ(s/√2) + s·φ(s/√2)/√(2π).
+    """
+    if activation == "relu":
+        return np.maximum(z, 0.0) ** 2
+    if activation == "gelu":
+        sqrt2 = np.sqrt(2.0)
+        erf_term = 0.5 * (1.0 + erf(z / sqrt2))
+        pdf_term = np.exp(-0.5 * z ** 2) / np.sqrt(2.0 * np.pi)
+        return z ** 2 * erf_term + z * pdf_term
+    raise ValueError(f"Unsupported activation: {activation}")
+
+
+def compute_energy_attention(
+    theta: NDArray[np.float64],
+    beta: float,
+) -> float:
+    """Compute attention energy on S¹: E_β[μ] = (1/2β) ∫∫ exp(β(cos(θ-θ')-1)) dμ(θ)dμ(θ').
+    
+    For empirical measure with N particles: (1/2β) · (1/N²) Σᵢⱼ exp(β(cos(θᵢ - θⱼ) - 1))
+    The factor exp(-β) comes from using exp(β(cos-1)) instead of exp(β cos) for numerical stability.
+    """
+    n = theta.shape[0]
+    diff = theta[:, None] - theta[None, :]  # (n, n)
+    weights = np.exp(beta * (np.cos(diff) - 1.0))  # exp(β(cos-1)) ∈ (0, 1]
+    return float(np.sum(weights)) / (2.0 * beta * n * n)
+
+
+def compute_energy_mlp(
+    theta: NDArray[np.float64],
+    params: MLPParams,
+) -> float:
+    """Compute MLP potential energy on S¹: (1/2) ∫ v_θ(x) dμ(x).
+    
+    Where v_θ(x) = Σⱼ ωⱼ φ(aⱼ·x) and x = (cos θ, sin θ).
+    For gradient MLP: ω_j is a scalar.
+    """
+    # x = (cos θ, sin θ) on S¹
+    x = np.stack([np.cos(theta), np.sin(theta)], axis=1)  # (n, 2)
+    z = x @ params.a.T  # (n, k) where k = n_units
+    phi = _activation_primitive(z, params.activation)  # (n, k)
+    
+    # omega has shape (k, 2). For gradient MLP, omega[j] = s_j * a[j].
+    # The scalar ω_j = omega[j] · a[j] (since a is unit)
+    omega_scalar = np.sum(params.omega * params.a, axis=1)  # (k,)
+    
+    # v_θ(x) = Σⱼ ω_j φ(a_j·x)
+    v = phi @ omega_scalar  # (n,)
+    
+    n = theta.shape[0]
+    return float(np.sum(v)) / (2.0 * n)
+
+
+def compute_total_energy(
+    theta: NDArray[np.float64],
+    beta: float,
+    mlp_params: Optional[MLPParams] = None,
+) -> float:
+    """Compute total energy for the gradient flow.
+    
+    E_{β,θ}[μ] = (1/2β)∫∫e^{β(cos(θ-θ')-1)}dμdμ + (1/2)∫v_θ(x)dμ
+    
+    The drift is ∇E (gradient ascent) or -∇E (gradient descent).
+    Energy should decrease along gradient descent flow.
+    """
+    energy = compute_energy_attention(theta, beta)
+    if mlp_params is not None:
+        energy += compute_energy_mlp(theta, mlp_params)
+    return energy

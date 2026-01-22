@@ -9,7 +9,7 @@ from .dynamics import TWO_PI
 def cluster_threshold(beta: float, scale: float) -> float:
     if beta <= 0.0:
         raise ValueError("beta must be positive.")
-    return scale / np.sqrt(beta)
+    return min(scale / np.sqrt(beta), np.pi / 4.0)
 
 
 def _circular_smooth(values: np.ndarray, sigma_bins: float) -> np.ndarray:
@@ -101,6 +101,17 @@ def cluster_count(theta: np.ndarray, threshold: float) -> int:
     return int(sizes.size)
 
 
+def cluster_masses(theta: np.ndarray, threshold: float) -> np.ndarray:
+    """Return the mass (fraction of particles) in each cluster, sorted descending."""
+    if theta.size == 0:
+        return np.array([])
+    sizes = _cluster_sizes(theta, threshold)
+    if sizes.size == 0:
+        return np.array([])
+    masses = sizes.astype(float) / theta.size
+    return np.sort(masses)[::-1]  # Descending order
+
+
 def cluster_max_spread(theta: np.ndarray, threshold: float) -> float:
     """Return the maximum within-cluster angular spread."""
     if theta.size == 0:
@@ -142,6 +153,12 @@ def mass_count(theta: np.ndarray, threshold: float, mass_threshold: float) -> in
         return 0
     min_size = mass_threshold * float(theta.size)
     return int(np.sum(sizes >= min_size))
+
+
+def heaviest_cluster_mass(theta: np.ndarray, threshold: float) -> float:
+    """Return the mass (fraction of particles) in the largest cluster on S1."""
+    masses = cluster_masses(theta, threshold)
+    return float(masses[0]) if masses.size > 0 else 0.0
 
 
 def convergence_index(

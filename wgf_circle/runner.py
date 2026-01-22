@@ -13,10 +13,11 @@ from tqdm import tqdm
 
 from .analysis import (
     cluster_count,
+    cluster_masses,
     cluster_max_spread,
     cluster_threshold,
     convergence_index,
-    mass_count,
+    heaviest_cluster_mass,
     mode_count,
 )
 from .config import RunConfig, SeedPlan, build_seed_plan, load_config
@@ -27,6 +28,7 @@ from .dynamics import (
     TWO_PI,
     attention_drift_at,
     attention_drift_particles,
+    compute_total_energy,
     mlp_drift,
     sample_mlp_params,
     sample_theta0,
@@ -38,14 +40,20 @@ from .plotting import (
     MLP_COLOR,
     NULL_COLOR,
     SA_COLOR,
+    compute_c_theta,
     gamma_k_s1,
     make_cluster_bar_plot,
     make_cluster_bar_plot_with_null,
+    make_energy_figure,
+    make_energy_overlay_figure,
+    make_all_masses_figure,
     make_field_frame,
     make_gamma_figure,
+    make_heaviest_mass_figure,
     make_histogram_comparison_frame,
     make_histogram_figure,
     make_histogram_frame,
+    make_mlp_potential_figure,
     make_mlp_scale_stop_time_figure,
     make_total_clusters_figure,
     make_trajectory_figure,
@@ -58,6 +66,14 @@ def progress_interval(total_steps: int, target_updates: int = 100) -> int:
     if total_steps <= 0:
         return 1
     return max(1, total_steps // max(1, target_updates))
+
+
+def _mass_count_from_masses(masses: np.ndarray, mass_threshold: float, n_particles: int) -> int:
+    if mass_threshold <= 0.0:
+        return int(masses.size)
+    if mass_threshold >= 1.0:
+        return 1 if n_particles > 0 else 0
+    return int(np.sum(masses >= mass_threshold))
 
 
 class ProgressHandle:
@@ -195,6 +211,18 @@ def _frame_indices(times: np.ndarray, interval: float) -> tuple[list[int], list[
     return unique_indices, unique_times
 
 
+def _snapshot_index(length: int, label: str) -> int:
+    if length <= 0:
+        return 0
+    if label == "init":
+        return 0
+    if label == "middle":
+        return length // 2
+    if label == "final":
+        return length - 1
+    raise ValueError(f"Unknown snapshot label: {label}")
+
+
 def _histogram_density(theta: np.ndarray, edges: np.ndarray) -> list[float]:
     counts, _ = np.histogram(theta, bins=edges, density=True)
     return counts.astype(float).tolist()
@@ -246,7 +274,6 @@ def _simulate_until_convergence(
                     sim_config.beta,
                     sim_config.attention_mode,
                     self_attention=sim_config.self_attention,
-                    ascending=sim_config.ascending,
                 )
                 if mlp_params is not None:
                     drift_check += mlp_drift(theta, mlp_params)
@@ -448,9 +475,11 @@ def _save_field_gif(
             theta_particles,
             beta,
             attention_mode,
-            ascending=ascending,
         )
         mlp = mlp_drift(theta_grid, params)
+        if not ascending:
+            att = -att
+            mlp = -mlp
         field = att + mlp
         fields.append(field)
         att_fields.append(att)
@@ -627,6 +656,8 @@ def _write_run_summary(
     mlp_mode_counts: list[int],
     null_mass_counts: list[int],
     mlp_mass_counts: list[int],
+    null_cluster_masses: list[list[float]],
+    mlp_cluster_masses: list[list[float]],
     null_stop_reasons: list[str],
     mlp_stop_reasons: list[str],
     num_mlp_inits: int,
@@ -645,6 +676,15 @@ def _write_run_summary(
     positions_final_mlp: Optional[np.ndarray] = None,
     max_drift_final_null: Optional[list[float]] = None,
     max_drift_final_mlp: Optional[list[float]] = None,
+    heaviest_mass_null: Optional[float] = None,
+    heaviest_mass_mlp: Optional[float] = None,
+    energy_times_null: Optional[list[float]] = None,
+    energy_values_null: Optional[list[float]] = None,
+    energy_times_mlp: Optional[list[float]] = None,
+    energy_values_mlp: Optional[list[float]] = None,
+    mlp_a: Optional[np.ndarray] = None,
+    mlp_omega: Optional[np.ndarray] = None,
+    mlp_activation: Optional[str] = None,
 ) -> None:
     summary = {
         "beta": beta,
@@ -656,6 +696,8 @@ def _write_run_summary(
         "mlp_mode_counts": mlp_mode_counts,
         "null_mass_counts": null_mass_counts,
         "mlp_mass_counts": mlp_mass_counts,
+        "null_cluster_masses": null_cluster_masses,
+        "mlp_cluster_masses": mlp_cluster_masses,
         "null_stop_reasons": null_stop_reasons,
         "mlp_stop_reasons": mlp_stop_reasons,
         "num_mlp_inits": num_mlp_inits,
@@ -681,6 +723,25 @@ def _write_run_summary(
         summary["max_drift_final_null"] = max_drift_final_null
     if max_drift_final_mlp is not None:
         summary["max_drift_final_mlp"] = max_drift_final_mlp
+    # Add heaviest cluster mass
+    if heaviest_mass_null is not None:
+        summary["heaviest_mass_null"] = heaviest_mass_null
+    if heaviest_mass_mlp is not None:
+        summary["heaviest_mass_mlp"] = heaviest_mass_mlp
+    # Add energy data
+    if energy_times_null is not None and energy_values_null is not None:
+        summary["energy_times_null"] = energy_times_null
+        summary["energy_values_null"] = energy_values_null
+    if energy_times_mlp is not None and energy_values_mlp is not None:
+        summary["energy_times_mlp"] = energy_times_mlp
+        summary["energy_values_mlp"] = energy_values_mlp
+    # Add MLP parameters for theoretical bound computation
+    if mlp_a is not None:
+        summary["mlp_a"] = mlp_a.tolist()
+    if mlp_omega is not None:
+        summary["mlp_omega"] = mlp_omega.tolist()
+    if mlp_activation is not None:
+        summary["mlp_activation"] = mlp_activation
     write_json(run_dir / "summary.json", summary, compact=False)
 
 
@@ -913,31 +974,22 @@ def run_experiment(config: RunConfig) -> None:
             null_cluster_times.append(
                 step_count * config.dt if stop_reason == "convergence" else None
             )
-            print(f"  [null init {idx + 1}] stop_reason={stop_reason}")
-            att0 = attention_drift_particles(
-                theta_hist[0],
-                beta,
-                config.attention_mode,
-                self_attention=config.self_attention,
-                ascending=config.ascending,
-            )
+            # Compute final stats
+            final_theta = theta_hist[-1]
+            n_clusters = cluster_count(final_theta, threshold)
+            masses = cluster_masses(final_theta, threshold)
             att_end = attention_drift_particles(
-                theta_hist[-1],
+                final_theta,
                 beta,
                 config.attention_mode,
                 self_attention=config.self_attention,
-                ascending=config.ascending,
             )
-            max_att0 = float(np.max(np.abs(att0))) if att0.size else 0.0
-            max_att_end = float(np.max(np.abs(att_end))) if att_end.size else 0.0
-            print(
-                f"  [null init {idx + 1}] t=0 max|att|={max_att0:.6e} "
-                f"max|total|={max_att0:.6e}"
-            )
-            print(
-                f"  [null init {idx + 1}] t=end max|att|={max_att_end:.6e} "
-                f"max|total|={max_att_end:.6e}"
-            )
+            max_drift = float(np.max(np.abs(att_end))) if att_end.size else 0.0
+            masses_str = ", ".join(f"{m:.3f}" for m in masses[:5])
+            if len(masses) > 5:
+                masses_str += ", ..."
+            print(f"  [null init {idx + 1}] stop_reason={stop_reason}, "
+                  f"clusters={n_clusters}, masses=[{masses_str}], max|drift|={max_drift:.6e}")
 
         null_histogram_densities = [
             _histogram_density(hist[-1], histogram_edges) for hist in null_histories
@@ -946,6 +998,10 @@ def run_experiment(config: RunConfig) -> None:
         for mlp_scale_eff, params_json in scale_runs:
             run_dir = make_run_dir(experiment_dir, beta, params_json)
             print(f"Run directory: {run_dir}")
+            hist_dir = run_dir / "histograms"
+            traj_dir = run_dir / "trajs"
+            hist_dir.mkdir(parents=True, exist_ok=True)
+            traj_dir.mkdir(parents=True, exist_ok=True)
             run_start = time.perf_counter()
             did_not_converge = null_did_not_converge
             all_steps: list[int] = list(null_steps)
@@ -1009,6 +1065,7 @@ def run_experiment(config: RunConfig) -> None:
             null_counts = []
             null_mode_counts = []
             null_mass_counts = []
+            null_cluster_masses: list[list[float]] = []
             for j, theta_hist in enumerate(null_histories):
                 label_slug = f"MLP_null_init{j + 1}"
                 _save_frames_and_gif(
@@ -1030,7 +1087,7 @@ def run_experiment(config: RunConfig) -> None:
                     save_gif=config.gif_sphere,
                 )
                 null_suffix = "" if config.num_point_inits == 1 else f"_init{j + 1}"
-                traj_null_stem = run_dir / f"trajectories_null{null_suffix}"
+                traj_null_stem = traj_dir / f"trajectories_null{null_suffix}"
                 fig = make_trajectory_figure(
                     null_times[j],
                     theta_hist,
@@ -1054,17 +1111,32 @@ def run_experiment(config: RunConfig) -> None:
                     conv_idx = convergence_index(theta_hist, threshold, config.convergence_window)
                 null_counts.append(cluster_count(theta_hist[conv_idx], threshold))
                 null_mode_counts.append(mode_count(theta_hist[conv_idx], threshold))
+                masses = cluster_masses(theta_hist[conv_idx], threshold)
+                null_cluster_masses.append(masses.tolist())
                 null_mass_counts.append(
-                    mass_count(theta_hist[conv_idx], threshold, config.mass_threshold)
+                    _mass_count_from_masses(masses, config.mass_threshold, theta_hist[conv_idx].size)
                 )
 
             mlp_counts = []
             mlp_mode_counts = []
             mlp_mass_counts = []
+            mlp_cluster_masses: list[list[float]] = []
             mlp_stop_reasons = []
             mlp_cluster_times: list[Optional[float]] = []
             mlp_histogram_densities: list[list[float]] = []
             for i, mlp_params in enumerate(mlp_params_list):
+                if config.gradient_mlp:
+                    mlp_suffix = f"_MLP{i + 1}" if config.num_mlp_inits > 1 else ""
+                    fig = make_mlp_potential_figure(
+                        mlp_params.a,
+                        mlp_params.omega,
+                        mlp_params.activation,
+                        line_color=mlp_color,
+                    )
+                    save_figure(fig, run_dir / f"mlp_potential{mlp_suffix}", formats=("pdf",))
+                    import matplotlib.pyplot as plt
+
+                    plt.close(fig)
                 mlp_histories = []
                 mlp_times = []
                 mlp_steps = []
@@ -1106,13 +1178,30 @@ def run_experiment(config: RunConfig) -> None:
                     mlp_cluster_times.append(
                         step_count * config.dt if stop_reason == "convergence" else None
                     )
-                    print(f"  [MLP {i + 1} init {j + 1}] stop_reason={stop_reason}")
+                    final_theta = theta_hist[-1]
+                    n_clusters = cluster_count(final_theta, threshold)
+                    masses = cluster_masses(final_theta, threshold)
+                    att_end = attention_drift_particles(
+                        final_theta,
+                        beta,
+                        config.attention_mode,
+                        self_attention=config.self_attention,
+                    )
+                    mlp_end = mlp_drift(final_theta, mlp_params)
+                    total_end = att_end + mlp_end
+                    max_drift = float(np.max(np.abs(total_end))) if total_end.size else 0.0
+                    masses_str = ", ".join(f"{m:.3f}" for m in masses[:5])
+                    if len(masses) > 5:
+                        masses_str += ", ..."
+                    print(
+                        f"  [MLP {i + 1} init {j + 1}] stop_reason={stop_reason}, "
+                        f"clusters={n_clusters}, masses=[{masses_str}], max|drift|={max_drift:.6e}"
+                    )
                     att0 = attention_drift_particles(
                         theta_hist[0],
                         beta,
                         config.attention_mode,
                         self_attention=config.self_attention,
-                        ascending=config.ascending,
                     )
                     mlp0 = mlp_drift(theta_hist[0], mlp_params)
                     total0 = att0 + mlp0
@@ -1121,7 +1210,6 @@ def run_experiment(config: RunConfig) -> None:
                         beta,
                         config.attention_mode,
                         self_attention=config.self_attention,
-                        ascending=config.ascending,
                     )
                     mlp_end = mlp_drift(theta_hist[-1], mlp_params)
                     total_end = att_end + mlp_end
@@ -1170,11 +1258,15 @@ def run_experiment(config: RunConfig) -> None:
                         mlp_suffix = f"_MLP{i + 1}"
                     if config.num_point_inits > 1:
                         mlp_suffix = f"{mlp_suffix}_init{j + 1}"
-                    traj_mlp_stem = run_dir / f"trajectories_MLP{mlp_suffix}"
+                    traj_mlp_stem = traj_dir / f"trajectories_MLP{mlp_suffix}"
                     fig = make_trajectory_figure(
                         mlp_times[j],
                         theta_hist,
                         color=MLP_COLOR,
+                        a=mlp_params.a,
+                        omega=mlp_params.omega,
+                        activation=mlp_params.activation,
+                        show_potential=config.gradient_mlp,
                     )
                     save_figure(fig, traj_mlp_stem, formats=("pdf",))
                     import matplotlib.pyplot as plt
@@ -1185,35 +1277,32 @@ def run_experiment(config: RunConfig) -> None:
                         theta_hist,
                         color=MLP_COLOR,
                         time_scale="log",
+                        a=mlp_params.a,
+                        omega=mlp_params.omega,
+                        activation=mlp_params.activation,
+                        show_potential=config.gradient_mlp,
                     )
                     save_figure(fig, traj_mlp_stem.with_name(f"{traj_mlp_stem.name}_log"), formats=("pdf",))
                     plt.close(fig)
-                    hist_stem = run_dir / f"histogram{mlp_suffix}"
-                    fig = make_histogram_figure(
-                        theta_hist[-1],
-                        null_histories[j][-1],
-                        a=mlp_params.a,
-                        omega=mlp_params.omega,
-                        activation=mlp_params.activation,
-                        include_null=False,
-                        show_potential=config.gradient_mlp,
-                        mlp_color=mlp_color,
-                    )
-                    save_figure(fig, hist_stem, formats=("pdf",))
-                    plt.close(fig)
-                    hist_null_stem = run_dir / f"histogram_with_null{mlp_suffix}"
-                    fig = make_histogram_figure(
-                        theta_hist[-1],
-                        null_histories[j][-1],
-                        a=mlp_params.a,
-                        omega=mlp_params.omega,
-                        activation=mlp_params.activation,
-                        include_null=True,
-                        show_potential=config.gradient_mlp,
-                        mlp_color=mlp_color,
-                    )
-                    save_figure(fig, hist_null_stem, formats=("pdf",))
-                    plt.close(fig)
+                    if theta_hist.shape[0] > 0 and null_histories[j].shape[0] > 0:
+                        for label in ("init", "middle", "final"):
+                            mlp_idx = _snapshot_index(theta_hist.shape[0], label)
+                            null_idx = _snapshot_index(null_histories[j].shape[0], label)
+                            hist_stem = hist_dir / f"histogram_{label}{mlp_suffix}"
+                            fig = make_histogram_figure(
+                                theta_hist[mlp_idx],
+                                null_histories[j][null_idx],
+                                a=mlp_params.a,
+                                omega=mlp_params.omega,
+                                activation=mlp_params.activation,
+                                include_null=False,
+                                show_potential=config.gradient_mlp,
+                                mlp_color=mlp_color,
+                            )
+                            save_figure(fig, hist_stem, formats=("pdf",))
+                            if label == "final":
+                                save_figure(fig, hist_dir / f"histogram{mlp_suffix}", formats=("pdf",))
+                            plt.close(fig)
                     if config.num_mlp_inits == 1 and config.num_point_inits == 1:
                         comparison_path = run_dir / "evolution_MLP_comparison.gif"
                     else:
@@ -1261,8 +1350,10 @@ def run_experiment(config: RunConfig) -> None:
                         conv_idx = convergence_index(theta_hist, threshold, config.convergence_window)
                     mlp_counts.append(cluster_count(theta_hist[conv_idx], threshold))
                     mlp_mode_counts.append(mode_count(theta_hist[conv_idx], threshold))
+                    masses = cluster_masses(theta_hist[conv_idx], threshold)
+                    mlp_cluster_masses.append(masses.tolist())
                     mlp_mass_counts.append(
-                        mass_count(theta_hist[conv_idx], threshold, config.mass_threshold)
+                        _mass_count_from_masses(masses, config.mass_threshold, theta_hist[conv_idx].size)
                     )
                     mlp_histogram_densities.append(
                         _histogram_density(theta_hist[-1], histogram_edges)
@@ -1300,12 +1391,17 @@ def run_experiment(config: RunConfig) -> None:
                 actual_total_time=actual_total_time,
                 actual_mlp_scale=mlp_scale_eff,
             )
+            # Add MLP a and omega arrays if we have mlp_params
+            if mlp_params_list:
+                first_mlp = mlp_params_list[0]
+                params["mlp_a"] = first_mlp.a.tolist()
+                params["mlp_omega"] = first_mlp.omega.tolist()
             write_json(run_dir / "params.json", params, compact=False)
             run_seconds = time.perf_counter() - run_start
             # Prepare position snapshots for summary (first init only)
             pos_initial = theta0_list[0] if theta0_list else None
-            pos_final_null = null_histories[0][-1] if null_histories and null_histories[0] else None
-            pos_final_mlp = mlp_histories[0][-1] if mlp_histories and mlp_histories[0] else None
+            pos_final_null = null_histories[0][-1] if null_histories and len(null_histories[0]) > 0 else None
+            pos_final_mlp = mlp_histories[0][-1] if mlp_histories and len(mlp_histories[0]) > 0 else None
             
             # Compute max drift at convergence for null model
             max_drift_null_list = []
@@ -1315,7 +1411,6 @@ def run_experiment(config: RunConfig) -> None:
                     beta,
                     config.attention_mode,
                     self_attention=config.self_attention,
-                    ascending=config.ascending,
                 )
                 max_drift_null = float(np.max(np.abs(null_drift)))
                 max_drift_null_list = [max_drift_null]
@@ -1334,11 +1429,46 @@ def run_experiment(config: RunConfig) -> None:
                     beta,
                     config.attention_mode,
                     self_attention=config.self_attention,
-                    ascending=config.ascending,
                 )
                 total_drift_mlp = att_d + mlp_d
                 max_drift_mlp = float(np.max(np.abs(total_drift_mlp)))
                 max_drift_mlp_list = [max_drift_mlp]
+            
+            # Compute heaviest cluster mass at final time
+            threshold = cluster_threshold(beta, config.cluster_scale)
+            heaviest_null = None
+            heaviest_mlp = None
+            if pos_final_null is not None:
+                heaviest_null = heaviest_cluster_mass(pos_final_null, threshold)
+            if pos_final_mlp is not None:
+                heaviest_mlp = heaviest_cluster_mass(pos_final_mlp, threshold)
+            
+            # Compute energy time series (for summary storage)
+            energy_times_null = None
+            energy_values_null = None
+            energy_times_mlp = None
+            energy_values_mlp = None
+            first_mlp_params = mlp_params_list[0] if mlp_params_list else None
+            
+            if null_histories and null_times and len(null_histories[0]) > 0:
+                energy_times_null = [float(t) for t in null_times[0]]
+                energy_values_null = [float(compute_total_energy(pts, beta, None)) for pts in null_histories[0]]
+            elif pos_initial is not None and pos_final_null is not None:
+                energy_times_null = [0.0, null_cluster_times[0] if null_cluster_times else 0.0]
+                energy_values_null = [
+                    float(compute_total_energy(pos_initial, beta, None)),
+                    float(compute_total_energy(pos_final_null, beta, None)),
+                ]
+            
+            if mlp_histories and mlp_times and len(mlp_histories[0]) > 0:
+                energy_times_mlp = [float(t) for t in mlp_times[0]]
+                energy_values_mlp = [float(compute_total_energy(pts, beta, first_mlp_params)) for pts in mlp_histories[0]]
+            elif pos_initial is not None and pos_final_mlp is not None:
+                energy_times_mlp = [0.0, mlp_cluster_times[0] if mlp_cluster_times else 0.0]
+                energy_values_mlp = [
+                    float(compute_total_energy(pos_initial, beta, first_mlp_params)),
+                    float(compute_total_energy(pos_final_mlp, beta, first_mlp_params)),
+                ]
             
             _write_run_summary(
                 run_dir,
@@ -1350,6 +1480,8 @@ def run_experiment(config: RunConfig) -> None:
                 mlp_mode_counts,
                 null_mass_counts,
                 mlp_mass_counts,
+                null_cluster_masses,
+                mlp_cluster_masses,
                 null_stop_reasons,
                 mlp_stop_reasons,
                 config.num_mlp_inits,
@@ -1367,7 +1499,59 @@ def run_experiment(config: RunConfig) -> None:
                 positions_final_mlp=pos_final_mlp,
                 max_drift_final_null=max_drift_null_list if max_drift_null_list else None,
                 max_drift_final_mlp=max_drift_mlp_list if max_drift_mlp_list else None,
+                heaviest_mass_null=heaviest_null,
+                heaviest_mass_mlp=heaviest_mlp,
+                energy_times_null=energy_times_null,
+                energy_values_null=energy_values_null,
+                energy_times_mlp=energy_times_mlp,
+                energy_values_mlp=energy_values_mlp,
+                mlp_a=mlp_params.a if mlp_params else None,
+                mlp_omega=mlp_params.omega if mlp_params else None,
+                mlp_activation=mlp_params.activation if mlp_params else None,
             )
+            
+            # ---------- ENERGY plots ----------
+            # Use first init for energy curves
+            if null_histories and mlp_histories and null_times and mlp_times:
+                first_null_hist = null_histories[0]
+                first_mlp_hist = mlp_histories[0]
+                first_null_times = null_times[0]
+                first_mlp_times = mlp_times[0]
+                
+                # Compute energy for each time step
+                energy_null = np.array([
+                    compute_total_energy(pts, beta, None)
+                    for pts in first_null_hist
+                ])
+                energy_mlp = np.array([
+                    compute_total_energy(pts, beta, first_mlp_params)
+                    for pts in first_mlp_hist
+                ])
+                
+                # Linear scale
+                fig = make_energy_figure(
+                    first_null_times,
+                    energy_null,
+                    first_mlp_times,
+                    energy_mlp,
+                    NULL_COLOR,
+                    mlp_color,
+                    time_scale="linear",
+                )
+                save_figure(fig, run_dir / "energy", formats=("pdf",))
+                plt.close(fig)
+                # Log scale
+                fig = make_energy_figure(
+                    first_null_times,
+                    energy_null,
+                    first_mlp_times,
+                    energy_mlp,
+                    NULL_COLOR,
+                    mlp_color,
+                    time_scale="log",
+                )
+                save_figure(fig, run_dir / "energy_log", formats=("pdf",))
+                plt.close(fig)
 
             if did_not_converge:
                 print("Warning: convergence not reached before max_steps.")
@@ -1498,6 +1682,190 @@ def run_experiment(config: RunConfig) -> None:
         )
         save_figure(fig, stats_dir / "mass_count_with_null", formats=("pdf",))
         plt.close(fig)
+        
+        # ---------- Heaviest cluster mass plot ----------
+        betas_arr = np.asarray([float(entry["beta"]) for entry in summaries])
+        betas_sorted = betas_arr[order]
+        
+        heaviest_null_list = []
+        heaviest_mlp_list = []
+        smallest_mlp_list = []
+        mlp_a = None
+        mlp_omega = None
+        mlp_activation = None
+
+        def _smallest_non_spurious(masses, params_json: Optional[str]) -> float:
+            if masses is None:
+                return float("nan")
+            try:
+                masses_arr = np.asarray(masses, dtype=float)
+            except Exception:
+                return float("nan")
+            if masses_arr.ndim > 1:
+                masses_arr = masses_arr[0]
+            if masses_arr.size == 0:
+                return float("nan")
+            mass_threshold = 0.0
+            n_particles = 0
+            if params_json:
+                try:
+                    params = json.loads(params_json)
+                    mass_threshold = float(params.get("mass_threshold", 0.0))
+                    n_particles = int(params.get("n_particles", 0))
+                except Exception:
+                    pass
+            min_mass = mass_threshold
+            if n_particles > 0:
+                min_mass = max(min_mass, 1.0 / n_particles)
+            valid = masses_arr[masses_arr >= min_mass]
+            if valid.size == 0:
+                return float("nan")
+            return float(np.min(valid))
+        
+        for idx in order:
+            entry = summaries[idx]
+            h_null = entry.get("heaviest_mass_null")
+            h_mlp = entry.get("heaviest_mass_mlp")
+            masses_list = entry.get("mlp_cluster_masses")
+            masses = None
+            if isinstance(masses_list, list) and masses_list:
+                masses = masses_list[0]
+            if h_mlp is None and masses:
+                try:
+                    h_mlp = float(np.max(np.asarray(masses, dtype=float)))
+                except Exception:
+                    h_mlp = None
+            heaviest_null_list.append(h_null if h_null is not None else np.nan)
+            heaviest_mlp_list.append(h_mlp if h_mlp is not None else np.nan)
+            smallest_mlp_list.append(_smallest_non_spurious(masses, entry.get("params_json")))
+
+            if mlp_a is None and mlp_omega is None and mlp_activation is None:
+                mlp_a_raw = entry.get("mlp_a")
+                mlp_omega_raw = entry.get("mlp_omega")
+                mlp_activation = entry.get("mlp_activation")
+                if mlp_a_raw is not None and mlp_omega_raw is not None:
+                    mlp_a = np.array(mlp_a_raw)
+                    mlp_omega = np.array(mlp_omega_raw)
+            
+            # Get MLP params from params.json (via summary's run_dir)
+            if mlp_a is None and mlp_omega is None and mlp_activation is None:
+                run_dir_str = entry.get("run_dir")
+                if run_dir_str:
+                    params_path = Path(run_dir_str) / "params.json"
+                    if params_path.exists():
+                        try:
+                            params_data = json.loads(params_path.read_text(encoding="utf-8"))
+                            mlp_a_raw = params_data.get("mlp_a")
+                            mlp_omega_raw = params_data.get("mlp_omega")
+                            mlp_activation = params_data.get("activation")
+                            if mlp_a_raw is not None and mlp_omega_raw is not None:
+                                mlp_a = np.array(mlp_a_raw)
+                                mlp_omega = np.array(mlp_omega_raw)
+                        except Exception:
+                            pass
+        
+        heaviest_null_arr = np.array(heaviest_null_list)
+        heaviest_mlp_arr = np.array(heaviest_mlp_list)
+        smallest_mlp_arr = np.array(smallest_mlp_list)
+        
+        fig = make_heaviest_mass_figure(
+            betas_sorted,
+            heaviest_null_arr,
+            heaviest_mlp_arr,
+            smallest_mlp=smallest_mlp_arr,
+            mlp_a=mlp_a,
+            mlp_omega=mlp_omega,
+            mlp_activation=mlp_activation,
+            null_color=NULL_COLOR,
+            mlp_color=MLP_COLOR,
+        )
+        save_figure(fig, stats_dir / "heaviest_mass", formats=("pdf",))
+        plt.close(fig)
+
+        # ---------- All cluster masses plot ----------
+        all_masses_list = []
+        for idx in order:
+            entry = summaries[idx]
+            masses_list = entry.get("mlp_cluster_masses")
+            masses_flat: list[float] = []
+            if isinstance(masses_list, list):
+                for masses in masses_list:
+                    try:
+                        masses_flat.extend(float(m) for m in masses)
+                    except Exception:
+                        continue
+            if not masses_flat:
+                positions = entry.get("positions_final_mlp")
+                params_json = entry.get("params_json")
+                if positions is not None and params_json:
+                    try:
+                        params = json.loads(params_json)
+                        cluster_scale = params.get("cluster_scale")
+                        beta_val = float(entry["beta"])
+                        if cluster_scale is not None and beta_val > 0.0:
+                            threshold = cluster_threshold(beta_val, float(cluster_scale))
+                            masses_flat = cluster_masses(
+                                np.asarray(positions, dtype=np.float64),
+                                threshold,
+                            ).tolist()
+                    except Exception:
+                        masses_flat = []
+            all_masses_list.append(masses_flat)
+
+        fig = make_all_masses_figure(
+            betas_sorted,
+            all_masses_list,
+            mlp_a=mlp_a,
+            mlp_omega=mlp_omega,
+            mlp_activation=mlp_activation,
+            mlp_color=MLP_COLOR,
+        )
+        save_figure(fig, stats_dir / "all_masses", formats=("pdf",))
+        plt.close(fig)
+        
+        # ---------- Energy overlay plot ----------
+        energy_data = []
+        for idx in order:
+            entry = summaries[idx]
+            e_times_null = entry.get("energy_times_null")
+            e_vals_null = entry.get("energy_values_null")
+            e_times_mlp = entry.get("energy_times_mlp")
+            e_vals_mlp = entry.get("energy_values_mlp")
+            
+            if e_times_null is not None and e_vals_null is not None:
+                energy_data.append({
+                    "beta": entry["beta"],
+                    "times_null": e_times_null,
+                    "energy_null": e_vals_null,
+                    "times_mlp": e_times_mlp if e_times_mlp else [],
+                    "energy_mlp": e_vals_mlp if e_vals_mlp else [],
+                })
+        
+        if energy_data:
+            n_betas = len(energy_data)
+            cmap = plt.cm.viridis
+            colors = [cmap(i / max(1, n_betas - 1)) for i in range(n_betas)]
+            colors_hex = ['#%02x%02x%02x' % (int(c[0]*255), int(c[1]*255), int(c[2]*255)) for c in colors]
+            
+            # Linear scale - without legend
+            fig = make_energy_overlay_figure(energy_data, colors_hex, time_scale="linear", show_legend=False)
+            save_figure(fig, stats_dir / "energy_overlay", formats=("pdf",))
+            plt.close(fig)
+            
+            # Linear scale - with legend
+            fig = make_energy_overlay_figure(energy_data, colors_hex, time_scale="linear", show_legend=True)
+            save_figure(fig, stats_dir / "energy_overlay_legend", formats=("pdf",))
+            plt.close(fig)
+            
+            # Log scale - without legend
+            fig = make_energy_overlay_figure(energy_data, colors_hex, time_scale="log", show_legend=False)
+            save_figure(fig, stats_dir / "energy_overlay_log", formats=("pdf",))
+            plt.close(fig)
+            
+            # Log scale - with legend
+            fig = make_energy_overlay_figure(energy_data, colors_hex, time_scale="log", show_legend=True)
+            save_figure(fig, stats_dir / "energy_overlay_log_legend", formats=("pdf",))
+            plt.close(fig)
 
 
 def main(config_path: Optional[Path] = None) -> None:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import warnings
 from pathlib import Path
 from typing import List, Optional
@@ -16,6 +17,11 @@ os.environ.setdefault("MPLCONFIGDIR", str(ROOT / ".matplotlib"))
 (ROOT / ".matplotlib").mkdir(exist_ok=True)
 
 mpl.use("Agg")
+_USE_TEX_ENV = os.getenv("WGF_USE_TEX")
+if _USE_TEX_ENV is not None:
+    _USE_TEX = _USE_TEX_ENV.strip().lower() not in {"0", "false", "no"}
+else:
+    _USE_TEX = shutil.which("latex") is not None
 PLOT_DPI = 1200
 BASE_FONT_SIZE = 14
 AXIS_LABEL_SIZE = 18
@@ -24,7 +30,7 @@ TITLE_SIZE = 18
 LEGEND_SIZE = 14
 mpl.rcParams.update(
     {
-        "text.usetex": True,
+        "text.usetex": _USE_TEX,
         "font.family": "serif",
         "font.serif": ["Computer Modern Roman"],
         "font.size": BASE_FONT_SIZE,
@@ -38,6 +44,8 @@ mpl.rcParams.update(
 )
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
+
+_TEX_FALLBACK_APPLIED = False
 from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm, to_rgb
 from matplotlib.ticker import MaxNLocator
 from matplotlib.patches import Wedge
@@ -50,7 +58,6 @@ POTENTIAL_NEG_COLOR =  "#D55E00"
 NULL_COLOR ="#ED5E93"
 MLP_COLOR =  "#0072B2"
 SA_COLOR = "#17BECF"
-STOP_SA_COLOR = "#D55E00"
 POINT_COLOR ="#000000"
 POTENTIAL_CMAP = LinearSegmentedColormap.from_list(
     "potential",
@@ -73,7 +80,15 @@ def gamma_k_s1(beta: float, k_values: NDArray[np.float64]) -> NDArray[np.float64
     For d=2, gamma_k = k^2 * W_hat_k, and W_hat_k = I_k(beta) / beta.
     """
     k = np.asarray(k_values, dtype=np.float64)
-    return (k * k) * iv(k, beta) / beta
+    if beta == 0.0:
+        gamma = np.zeros_like(k)
+        gamma[np.isclose(k, 1.0)] = 0.5
+        return gamma
+
+    gamma = np.zeros_like(k)
+    mask = k != 0.0
+    gamma[mask] = (k[mask] * k[mask]) * iv(k[mask], beta) / beta
+    return gamma
 
 
 def plot_gamma(ax, beta: float, k_limit: int, k_max: int) -> None:
@@ -180,12 +195,12 @@ def plot_trajectories(
     times: np.ndarray,
     theta_hist: np.ndarray,
     color: str,
-    angle_bins: int = 120,
+    angle_bins: int = 360,
     time_bins: int = 200,
     max_particles: int = 150,
     time_stride: int = 2,
     time_scale: str = "linear",
-    line_width: float = 0.6,
+    line_width: float = 0.8,
     line_style: Optional[object] = None,
 ) -> None:
     # Subsample trajectories and shade by local density.
@@ -221,21 +236,24 @@ def plot_trajectories(
     density_max = 1.0
     use_density = False
     if times_s.size > 0 and n_particles > 0:
-        angle_bins = max(8, int(angle_bins))
+        # Compute smooth density using a von Mises kernel instead of discrete bins
+        # This avoids the "staircase" artifacts when particles cluster
         theta_mod = np.mod(theta_s, TWO_PI)
-        bin_idx = np.floor(theta_mod * angle_bins / TWO_PI).astype(int)
-        bin_idx = np.clip(bin_idx, 0, angle_bins - 1)
-        counts = np.zeros((times_s.size, angle_bins), dtype=int)
-        for t_idx in range(times_s.size):
-            counts[t_idx] = np.bincount(bin_idx[t_idx], minlength=angle_bins)
-        density_sel = counts[np.arange(times_s.size)[:, None], bin_idx[:, particle_idx]]
+        kappa = 50.0  # concentration parameter (higher = sharper kernel)
+        # For each selected particle, compute its density as sum of von Mises contributions
+        theta_selected = theta_mod[:, particle_idx]  # (n_times, n_selected)
+        # Compute pairwise angular differences with all particles
+        diff = theta_mod[:, :, None] - theta_selected[:, None, :]  # (n_times, n_all, n_selected)
+        # von Mises kernel: exp(kappa * cos(diff)) normalized
+        kernel_vals = np.exp(kappa * (np.cos(diff) - 1.0))  # subtract 1 for numerical stability
+        density_sel = kernel_vals.sum(axis=1)  # (n_times, n_selected)
         density_min = float(np.min(density_sel))
         density_max = float(np.max(density_sel))
         use_density = density_max > density_min
 
-    spline_target_points = 400
-    spline_min_points = 60
-    max_fit_points = 600
+    spline_target_points = 600
+    spline_min_points = 100
+    max_fit_points = 800
     t_fit = None
     t_smooth = None
     fit_stride = 1
@@ -306,6 +324,55 @@ def plot_trajectories(
     if time_scale == "log":
         ax.set_xscale("log")
     ax.set_xlim(float(times_s[0]), float(times_s[-1]))
+
+
+def _trajectory_time_bounds(times: np.ndarray, time_scale: str) -> tuple[float, float]:
+    times_plot = np.asarray(times, dtype=float)
+    if times_plot.size == 0:
+        return 0.0, 1.0
+    if time_scale == "log":
+        positive = times_plot[times_plot > 0.0]
+        if positive.size:
+            eps = float(np.min(positive)) * 0.5
+        else:
+            eps = 1e-6
+        times_plot = np.where(times_plot <= 0.0, eps, times_plot)
+    return float(times_plot[0]), float(times_plot[-1])
+
+
+def add_trajectory_potential_background(
+    ax,
+    times: np.ndarray,
+    a: np.ndarray,
+    omega: np.ndarray,
+    activation: str,
+    time_scale: str = "linear",
+    alpha: float = 0.3,
+    n_theta: int = 720,
+) -> None:
+    if a.size == 0 or omega.size == 0:
+        return
+    n_theta = max(2, int(n_theta))
+    theta = np.linspace(0.0, TWO_PI, n_theta, endpoint=False)
+    potential = mlp_potential(theta, a, omega, activation)
+    if potential.size == 0:
+        return
+    max_abs = float(np.max(np.abs(potential)))
+    if max_abs <= 0.0:
+        return
+    norm = TwoSlopeNorm(vcenter=0.0, vmin=-max_abs, vmax=max_abs)
+    t_min, t_max = _trajectory_time_bounds(times, time_scale)
+    ax.imshow(
+        potential[:, None],
+        extent=(t_min, t_max, 0.0, TWO_PI),
+        aspect="auto",
+        cmap=POTENTIAL_CMAP,
+        norm=norm,
+        alpha=alpha,
+        origin="lower",
+        interpolation="nearest",
+        zorder=0,
+    )
 
 
 def _boundary_angles(a: np.ndarray) -> np.ndarray:
@@ -457,13 +524,13 @@ def plot_histogram_with_potential(
     show_potential: bool = True,
     mlp_color: str = MLP_COLOR,
 ) -> None:
-    counts, edges = np.histogram(theta, bins=bins, range=(0.0, TWO_PI), density=True)
+    counts, edges = np.histogram(theta, bins=bins, range=(0.0, TWO_PI), density=False)
     width = edges[1] - edges[0]
     max_height = counts.max() if counts.size else 1.0
 
     counts_null = None
     if null_theta is not None and null_theta.size:
-        counts_null, _ = np.histogram(null_theta, bins=edges, density=True)
+        counts_null, _ = np.histogram(null_theta, bins=edges, density=False)
         max_height = max(max_height, counts_null.max())
 
     if show_potential and a.size:
@@ -505,7 +572,7 @@ def plot_histogram_with_potential(
     ax.set_xlim(0.0, TWO_PI)
     ax.set_xticks([0.0, np.pi, TWO_PI], ["0", r"$\pi$", r"$2\pi$"])
     ax.set_xlabel(r"$\theta$")
-    ax.set_ylabel(r"$\mu(\theta)$")
+    ax.set_ylabel(r"$\mathrm{count}$")
 
 
 def make_trajectory_figure(
@@ -513,8 +580,23 @@ def make_trajectory_figure(
     theta_hist: np.ndarray,
     color: str,
     time_scale: str = "linear",
+    a: Optional[np.ndarray] = None,
+    omega: Optional[np.ndarray] = None,
+    activation: str = "relu",
+    show_potential: bool = False,
+    potential_alpha: float = 0.3,
 ) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(4.2, 4.0), constrained_layout=True)
+    if show_potential and a is not None and omega is not None:
+        add_trajectory_potential_background(
+            ax,
+            times,
+            a,
+            omega,
+            activation,
+            time_scale=time_scale,
+            alpha=potential_alpha,
+        )
     plot_trajectories(
         ax,
         times,
@@ -550,6 +632,27 @@ def make_histogram_figure(
     return fig
 
 
+def make_mlp_potential_figure(
+    a: np.ndarray,
+    omega: np.ndarray,
+    activation: str,
+    n_points: int = 720,
+    line_color: str = MLP_COLOR,
+    line_width: float = 1.6,
+) -> plt.Figure:
+    theta = np.linspace(0.0, TWO_PI, n_points, endpoint=True)
+    potential = mlp_potential(theta, a, omega, activation)
+    fig, ax = plt.subplots(figsize=(6.0, 3.6), constrained_layout=True)
+    ax.plot(theta, potential, color=line_color, linewidth=line_width)
+    ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.4)
+    ax.set_xlim(0.0, TWO_PI)
+    ax.set_xticks([0.0, np.pi, TWO_PI], ["0", r"$\pi$", r"$2\pi$"])
+    ax.set_xlabel(r"$\theta$")
+    ax.set_ylabel(r"$v(\theta)$")
+    ax.grid(True, linewidth=0.4, alpha=0.35)
+    return fig
+
+
 def make_gamma_figure(beta: float, k_limit: int, k_max: int) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(4.2, 4.0), constrained_layout=True)
     plot_gamma(ax, beta, k_limit, k_max)
@@ -557,6 +660,7 @@ def make_gamma_figure(beta: float, k_limit: int, k_max: int) -> plt.Figure:
 
 
 def save_figure(fig, output_stem: Path, formats: tuple[str, ...] = ("pdf",)) -> None:
+    global _TEX_FALLBACK_APPLIED
     for fmt in formats:
         with warnings.catch_warnings():
             warnings.filterwarnings(
@@ -564,20 +668,31 @@ def save_figure(fig, output_stem: Path, formats: tuple[str, ...] = ("pdf",)) -> 
                 message="constrained_layout not applied*",
                 category=UserWarning,
             )
-            fig.savefig(output_stem.with_suffix(f".{fmt}"), dpi=PLOT_DPI)
+            try:
+                fig.savefig(output_stem.with_suffix(f".{fmt}"), dpi=PLOT_DPI)
+            except RuntimeError as exc:
+                message = str(exc).lower()
+                tex_error = "latex was not able to process" in message or "type1cm.sty" in message
+                if not tex_error or _TEX_FALLBACK_APPLIED:
+                    raise
+                _TEX_FALLBACK_APPLIED = True
+                mpl.rcParams.update({"text.usetex": False})
+                print("Warning: LaTeX unavailable; falling back to mathtext for plots.")
+                fig.savefig(output_stem.with_suffix(f".{fmt}"), dpi=PLOT_DPI)
 
 
 def make_mlp_scale_stop_time_figure(
     scales: np.ndarray,
     stop_times: np.ndarray,
+    line_color: str = MLP_COLOR,
     point_size: float = 3.0,
     line_width: float = 1.2,
 ) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(6.0, 4.0), constrained_layout=True)
-    ax.plot(scales, stop_times, color=MLP_COLOR, linewidth=line_width)
-    ax.scatter(scales, stop_times, color=MLP_COLOR, s=point_size, zorder=3)
+    ax.plot(scales, stop_times, color=line_color, linewidth=line_width)
+    ax.scatter(scales, stop_times, color=line_color, s=point_size, zorder=3)
     ax.set_xlabel(r"$|\omega_j|$")
-    ax.set_ylabel(r"$\mathrm{Stopping\ time\ (s)}$")
+    ax.set_ylabel("Final time")
     ax.yaxis.set_major_locator(MaxNLocator(nbins=12))
     ax.set_ylim(bottom=0.0)
     ax.grid(True, linewidth=0.4, alpha=0.35)
@@ -594,11 +709,11 @@ def make_mlp_scale_stop_time_comparison_figure(
 ) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(6.0, 4.0), constrained_layout=True)
     ax.plot(usa_scales, usa_stop_times, color=MLP_COLOR, linewidth=line_width)
-    ax.plot(sa_scales, sa_stop_times, color=STOP_SA_COLOR, linewidth=line_width)
+    ax.plot(sa_scales, sa_stop_times, color=SA_COLOR, linewidth=line_width, linestyle="--")
     ax.scatter(usa_scales, usa_stop_times, color=MLP_COLOR, s=point_size, zorder=3)
-    ax.scatter(sa_scales, sa_stop_times, color=STOP_SA_COLOR, s=point_size, zorder=3)
+    ax.scatter(sa_scales, sa_stop_times, color=SA_COLOR, s=point_size, zorder=3)
     ax.set_xlabel(r"$|\omega_j|$")
-    ax.set_ylabel(r"$\mathrm{Stopping\ time\ (s)}$")
+    ax.set_ylabel("Final time (s)")
     ax.yaxis.set_major_locator(MaxNLocator(nbins=12))
     ax.set_ylim(bottom=0.0)
     ax.grid(True, linewidth=0.4, alpha=0.35)
@@ -669,7 +784,7 @@ def plot_histogram_1d(
     color: str,
     bins: int = 80,
 ) -> None:
-    counts, edges = np.histogram(theta, bins=bins, range=(0.0, TWO_PI), density=True)
+    counts, edges = np.histogram(theta, bins=bins, range=(0.0, TWO_PI), density=False)
     width = edges[1] - edges[0]
     ax.bar(
         edges[:-1],
@@ -683,7 +798,7 @@ def plot_histogram_1d(
     ax.set_xlim(0.0, TWO_PI)
     ax.set_xticks([0.0, np.pi, TWO_PI], ["0", r"$\pi$", r"$2\pi$"])
     ax.set_xlabel(r"$\theta$")
-    ax.set_ylabel(r"$\mu(\theta)$")
+    ax.set_ylabel(r"$\mathrm{count}$")
 
 
 def make_convergence_figure(
@@ -881,11 +996,12 @@ def make_histogram_frame(
         potential = mlp_potential(theta_grid, a, omega, activation)
         _draw_potential_inside(ax, theta_grid, potential)
 
-    ax.scatter(np.cos(theta), np.sin(theta), s=6, color=POINT_COLOR, alpha=0.6, zorder=4)
+    ax.scatter(np.cos(theta), np.sin(theta), s=12, color=color, alpha=0.6, zorder=4)
     ax.set_title(
         rf"$\mathrm{{{attention_label}}},\ t={time_value:.3f},\ \beta={beta:g},\ "
         rf"N={n_particles},\ {mlp_title}$"
     )
+    fig.subplots_adjust(top=0.88)
 
     return fig
 
@@ -906,7 +1022,7 @@ def make_histogram_comparison_frame(
     show_potential: bool = True,
     mlp_color: str = MLP_COLOR,
 ) -> plt.Figure:
-    fig, axes = plt.subplots(ncols=2, figsize=(11.0, 5.5), constrained_layout=True)
+    fig, axes = plt.subplots(ncols=2, figsize=(11.0, 5.5))
 
     a_null = np.empty((0, 2))
     omega_null = np.empty((0, 2))
@@ -922,16 +1038,16 @@ def make_histogram_comparison_frame(
     axes[0].scatter(
         np.cos(theta_null),
         np.sin(theta_null),
-        s=6,
-        color=POINT_COLOR,
+        s=12,
+        color=NULL_COLOR,
         alpha=0.6,
         zorder=4,
     )
     axes[1].scatter(
         np.cos(theta_mlp),
         np.sin(theta_mlp),
-        s=6,
-        color=POINT_COLOR,
+        s=12,
+        color=mlp_color,
         alpha=0.6,
         zorder=4,
     )
@@ -942,6 +1058,7 @@ def make_histogram_comparison_frame(
         rf"$\mathrm{{{attention_label}}},\ t={time_value:.3f},\ \beta={beta:g},\ "
         rf"N={n_particles}$"
     )
+    fig.subplots_adjust(left=0.06, right=0.94, bottom=0.06, top=0.86, wspace=0.2)
     return fig
 
 
@@ -987,7 +1104,7 @@ def make_field_frame(
     attention_label: str,
     y_limits: tuple[float, float],
 ) -> plt.Figure:
-    fig, ax = plt.subplots(figsize=(7.0, 3.0), constrained_layout=True)
+    fig, ax = plt.subplots(figsize=(7.0, 3.0))
     y_min, y_max = y_limits
 
     if potential is not None and potential.size:
@@ -1033,4 +1150,293 @@ def make_field_frame(
         rf"$\mathrm{{{attention_label}}},\ t={time_value:.3f},\ \beta={beta:g},\ "
         rf"N={n_particles},\ {mlp_title}$"
     )
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.9))
+    return fig
+
+
+def make_energy_figure(
+    times_null: np.ndarray,
+    energy_null: np.ndarray,
+    times_mlp: np.ndarray,
+    energy_mlp: np.ndarray,
+    null_color: str,
+    mlp_color: str,
+    time_scale: str = "linear",
+) -> "plt.Figure":
+    """Create energy vs time plot.
+    
+    Args:
+        times_null: Time array for null model
+        energy_null: Energy values for null model
+        times_mlp: Time array for MLP model
+        energy_mlp: Energy values for MLP model
+        null_color: Color for null curve
+        mlp_color: Color for MLP curve
+        time_scale: "linear" or "log"
+        
+    Note: If null simulation stopped earlier than MLP, the null curve is 
+    extended with its final energy value to match MLP's time duration.
+    """
+    fig, ax = plt.subplots(figsize=(5, 2.5))
+    
+    # Extend null curve to match MLP time if null stopped earlier
+    t_max_mlp = times_mlp[-1] if len(times_mlp) > 0 else 0
+    t_max_null = times_null[-1] if len(times_null) > 0 else 0
+    
+    if t_max_null < t_max_mlp and len(energy_null) > 0:
+        # Extend null curve with constant final value
+        times_null_ext = np.concatenate([times_null, [t_max_mlp]])
+        energy_null_ext = np.concatenate([energy_null, [energy_null[-1]]])
+    else:
+        times_null_ext = times_null
+        energy_null_ext = energy_null
+    
+    if time_scale == "log":
+        # Skip t=0 for log scale
+        mask_null = times_null_ext > 0
+        mask_mlp = times_mlp > 0
+        ax.plot(times_null_ext[mask_null], energy_null_ext[mask_null], color=null_color, linewidth=1.2, label="Null")
+        ax.plot(times_mlp[mask_mlp], energy_mlp[mask_mlp], color=mlp_color, linewidth=1.2, label="MLP")
+        ax.set_xscale("log")
+    else:
+        ax.plot(times_null_ext, energy_null_ext, color=null_color, linewidth=1.2, label="Null")
+        ax.plot(times_mlp, energy_mlp, color=mlp_color, linewidth=1.2, label="MLP")
+    ax.set_xlabel(r"$t$")
+    
+    ax.tick_params(axis="both", which="major", labelsize=9)
+    ax.tick_params(axis="both", which="minor", labelsize=7)
+    
+    # Use scientific notation for y-axis if values are large
+    ax.ticklabel_format(axis="y", style="sci", scilimits=(-2, 3), useMathText=True)
+    
+    fig.tight_layout()
+    return fig
+
+
+def compute_c_theta(
+    mlp_a: np.ndarray,
+    mlp_omega: np.ndarray,
+    activation: str,
+) -> float:
+    """Compute C_θ = Σ_j |ω_j| * (Lip(σ)|a_j|² + (|σ(0)| + Lip(σ)|a_j|)|a_j|).
+    
+    For relu: Lip(σ) = 1, σ(0) = 0
+    For gelu: Lip(σ) ≈ 1.085, σ(0) = 0
+    """
+    if activation == "relu":
+        lip_sigma = 1.0
+        sigma_0 = 0.0
+    elif activation == "gelu":
+        lip_sigma = 1.085  # Approximate Lipschitz constant for GELU
+        sigma_0 = 0.0
+    else:
+        lip_sigma = 1.0
+        sigma_0 = 0.0
+    
+    c_theta = 0.0
+    for j in range(mlp_a.shape[0]):
+        a_j = mlp_a[j]
+        omega_j = mlp_omega[j]
+        norm_a_j = np.linalg.norm(a_j)
+        norm_omega_j = np.linalg.norm(omega_j)
+        
+        term = norm_omega_j * (
+            lip_sigma * norm_a_j**2 + 
+            (sigma_0 + lip_sigma * norm_a_j) * norm_a_j
+        )
+        c_theta += term
+    
+    return c_theta
+
+
+def theoretical_heaviest_mass_bound(beta: float, c_theta: float) -> float:
+    """Compute the theoretical bound for heaviest cluster mass.
+    
+    Formula: (4 + 2*e^(3/2) * C_θ * e^(-β)) / (4 + (3/4)*e^(11/8))
+    
+    Returns value > 1 if bound is not useful (shouldn't be plotted).
+    """
+    numerator = 4.0 + 2.0 * np.exp(1.5) * c_theta * np.exp(-beta)
+    denominator = 4.0 + 0.75 * np.exp(11.0 / 8.0)
+    return numerator / denominator
+
+
+def make_heaviest_mass_figure(
+    betas: np.ndarray,
+    heaviest_null: np.ndarray,
+    heaviest_mlp: np.ndarray,
+    smallest_mlp: Optional[np.ndarray] = None,
+    mlp_a: Optional[np.ndarray] = None,
+    mlp_omega: Optional[np.ndarray] = None,
+    mlp_activation: Optional[str] = None,
+    null_color: str = NULL_COLOR,
+    mlp_color: str = MLP_COLOR,
+    theory_color: str = "#9467bd",
+    smallest_color: str = MLP_COLOR,
+) -> plt.Figure:
+    """Plot heaviest cluster mass vs sqrt(beta).
+    
+    Only plots MLP curve and theoretical bound (no null curve).
+    If mlp_a, mlp_omega, and mlp_activation are provided, computes and plots theoretical bound.
+    """
+    fig, ax = plt.subplots(figsize=(5, 3.5))
+    
+    sqrt_betas = np.sqrt(betas)
+    
+    # Plot MLP curve only
+    ax.plot(
+        sqrt_betas,
+        heaviest_mlp,
+        "s-",
+        color=mlp_color,
+        markersize=3,
+        linewidth=1.2,
+        label="heaviest",
+    )
+    if smallest_mlp is not None:
+        ax.plot(
+            sqrt_betas,
+            smallest_mlp,
+            "o--",
+            color=smallest_color,
+            markersize=3,
+            linewidth=1.0,
+            label="smallest",
+        )
+    
+    # Plot theoretical bound if MLP parameters provided
+    if mlp_a is not None and mlp_omega is not None and mlp_activation is not None:
+        c_theta = compute_c_theta(mlp_a, mlp_omega, mlp_activation)
+        theory_values = np.array([theoretical_heaviest_mass_bound(b, c_theta) for b in betas])
+        ax.plot(
+            sqrt_betas,
+            theory_values,
+            "^--",
+            color=theory_color,
+            markersize=3,
+            linewidth=1.0,
+            label="theory",
+        )
+    
+    # Plot horizontal line at constant 16/(16 + 3*e^(11/8))
+    constant_threshold = 16.0 / (16.0 + 3.0 * np.exp(11.0 / 8.0))
+    ax.axhline(y=constant_threshold, color="black", linestyle="--", linewidth=1.0)
+    
+    ax.set_xlabel(r"$\sqrt{\beta}$")
+    ax.set_ylabel(r"mass")
+    
+    # Set y-axis limits based on data (don't start at 0)
+    y_values = [np.min(heaviest_mlp), constant_threshold]
+    if smallest_mlp is not None and smallest_mlp.size:
+        finite_smallest = smallest_mlp[np.isfinite(smallest_mlp)]
+        if finite_smallest.size:
+            y_values.append(np.min(finite_smallest))
+    y_min = min(y_values) - 0.05
+    ax.set_ylim(y_min, 1.05)
+    
+    ax.tick_params(axis="both", which="major", labelsize=9)
+    ax.tick_params(axis="both", which="minor", labelsize=7)
+    
+    fig.tight_layout()
+    return fig
+
+
+def make_all_masses_figure(
+    betas: np.ndarray,
+    all_masses: list[list[float]],
+    mlp_a: Optional[np.ndarray] = None,
+    mlp_omega: Optional[np.ndarray] = None,
+    mlp_activation: Optional[str] = None,
+    mlp_color: str = MLP_COLOR,
+    theory_color: str = "#D55E00",
+    point_alpha: float = 0.6,
+) -> plt.Figure:
+    """Plot all cluster masses vs sqrt(beta)."""
+    fig, ax = plt.subplots(figsize=(5, 3.5))
+
+    sqrt_betas = np.sqrt(betas)
+    jitter_width = 0.015
+    for x, masses in zip(sqrt_betas, all_masses):
+        masses_arr = np.asarray(masses, dtype=float).ravel()
+        masses_arr = masses_arr[np.isfinite(masses_arr)]
+        if masses_arr.size == 0:
+            continue
+        if masses_arr.size == 1:
+            x_vals = np.array([x])
+        else:
+            jitter = np.linspace(-jitter_width, jitter_width, masses_arr.size)
+            x_vals = x + jitter
+        ax.scatter(
+            x_vals,
+            masses_arr,
+            s=10,
+            color=mlp_color,
+            alpha=point_alpha,
+            linewidths=0.0,
+        )
+
+    if mlp_a is not None and mlp_omega is not None and mlp_activation is not None:
+        c_theta = compute_c_theta(mlp_a, mlp_omega, mlp_activation)
+        theory_values = np.array([theoretical_heaviest_mass_bound(b, c_theta) for b in betas])
+        ax.plot(sqrt_betas, theory_values, "^--", color=theory_color, markersize=3, linewidth=1.0)
+
+    constant_threshold = 16.0 / (16.0 + 3.0 * np.exp(11.0 / 8.0))
+    ax.axhline(y=constant_threshold, color="black", linestyle="--", linewidth=1.0)
+
+    ax.set_xlabel(r"$\sqrt{\beta}$")
+    ax.set_ylabel(r"mass")
+    ax.set_ylim(0.0, 1.05)
+    ax.tick_params(axis="both", which="major", labelsize=9)
+    ax.tick_params(axis="both", which="minor", labelsize=7)
+
+    fig.tight_layout()
+    return fig
+
+
+def make_energy_overlay_figure(
+    energy_data: list[dict],
+    colors: list[str],
+    time_scale: str = "linear",
+    show_legend: bool = False,
+) -> plt.Figure:
+    """Plot energy decay curves for multiple betas in the same figure.
+    
+    Only MLP curves are plotted (no null/MLP=0 curves) for clarity.
+    
+    Args:
+        energy_data: List of dicts with keys 'beta', 'times_mlp', 'energy_mlp'
+        colors: List of colors, one per beta
+        time_scale: "linear" or "log"
+        show_legend: Whether to show a compact legend with beta values
+    """
+    fig, ax = plt.subplots(figsize=(6, 4))
+    
+    for i, data in enumerate(energy_data):
+        color = colors[i % len(colors)]
+        beta = data.get("beta", i)
+        times_mlp = np.array(data.get("times_mlp", []))
+        energy_mlp = np.array(data.get("energy_mlp", []))
+        
+        label = rf"$\beta={int(beta)}$" if beta == int(beta) else rf"$\beta={beta:.1f}$"
+        
+        # Only plot MLP curves (solid lines)
+        if len(times_mlp) > 0 and len(energy_mlp) > 0:
+            if time_scale == "log":
+                mask = times_mlp > 0
+                ax.plot(times_mlp[mask], energy_mlp[mask], "-", color=color, linewidth=1.2, label=label if show_legend else None)
+            else:
+                ax.plot(times_mlp, energy_mlp, "-", color=color, linewidth=1.2, label=label if show_legend else None)
+    
+    if time_scale == "log":
+        ax.set_xscale("log")
+        ax.set_xlabel(r"$t$ (log)")
+    else:
+        ax.set_xlabel(r"$t$")
+    
+    ax.set_ylabel(r"$\mathsf{E}[\mu_t]$")
+    ax.tick_params(axis="both", which="major", labelsize=9)
+    ax.tick_params(axis="both", which="minor", labelsize=7)
+    ax.ticklabel_format(axis="y", style="sci", scilimits=(-2, 3), useMathText=True)
+    
+    fig.tight_layout()
     return fig
