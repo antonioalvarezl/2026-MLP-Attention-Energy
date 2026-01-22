@@ -64,22 +64,29 @@ When `gradient_MLP=true`, we constrain $\omega_m = s_m a_m$ so the MLP is a grad
 **Unnormalized self-attention (USA):**
 
 $$
-\dot{x}_i = s \cdot \frac{1}{N} \sum_{j=1}^N w_{ij} \Pi_{x_i}(x_j - x_i) + u_{\mathrm{MLP}}(x_i).
+A_i = \frac{1}{N} \sum_{j=1}^N w_{ij} \Pi_{x_i}(x_j - x_i).
 $$
 
 **Normalized self-attention (SA):**
 
 $$
-\dot{x}_i = s \cdot \frac{\sum_{j=1}^N w_{ij} \Pi_{x_i}(x_j - x_i)}{\sum_{j=1}^N w_{ij}} + u_{\mathrm{MLP}}(x_i).
+A_i = \frac{\sum_{j=1}^N w_{ij} \Pi_{x_i}(x_j - x_i)}{\sum_{j=1}^N w_{ij}}.
 $$
 
-Here $s = -1$ if `ascending=true` (gradient ascent) and $s = +1$ if
-`ascending=false` (gradient descent).
+Total drift is $A_i + u_{\mathrm{MLP}}(x_i)$. The dynamics are:
+
+$$
+\dot{x}_i =
+\begin{cases}
+A_i + u_{\mathrm{MLP}}(x_i), & \texttt{ascending=true} \\
+-(A_i + u_{\mathrm{MLP}}(x_i)), & \texttt{ascending=false}
+\end{cases}
+$$
 
 For USA, the self-attention drift corresponds to the gradient flow of
 
 $$
-\mathsf{E}_\beta[\mu] = \frac{1}{2\beta} \iint e^{\beta x \cdot y}\, d\mu(x)\, d\mu(y).
+\mathsf{E}_\beta[\mu] = \frac{1}{2\beta} \iint e^{\beta (x \cdot y - 1)}\, d\mu(x)\, d\mu(y).
 $$
 
 ## Quick Start
@@ -113,22 +120,25 @@ produces its own run folder.
 ### S¹ specific outputs
 
 - `gamma_k.pdf` — eigenvalue spectrum
-- `trajectories_null*.pdf` — null model (MLP=0) trajectories
-- `trajectories_MLP*.pdf` — MLP trajectories
-- `histogram*.pdf` — final particle distribution
+- `trajs/trajectories_null*.pdf` — null model (MLP=0) trajectories
+- `trajs/trajectories_MLP*.pdf` — MLP trajectories (with potential background when `gradient_MLP=true`)
+- `histograms/histogram_{init,middle,final}*.pdf` — particle distribution over time (final also saved as `histograms/histogram*.pdf`)
+- `mlp_potential*.pdf` — MLP potential $v(\theta)$ (gradient MLP only)
+- `energy.pdf`, `energy_log.pdf` — energy vs time (null + MLP)
 - `evolution_*.gif` — animated evolution (if `gif_sphere=true`)
 
 ### S² specific outputs
 
-- `sphere_init_*.pdf` — initial particle configuration
-- `sphere_middle_*.pdf` — mid-evolution snapshot
-- `sphere_final_*.pdf` — final configuration
-- `sphere_histogram_init_*.pdf` — 3D bar histogram at initial time
-- `sphere_histogram_middle_*.pdf` — 3D bar histogram at middle time
-- `sphere_histogram_final_*.pdf` — 3D bar histogram at final time
-- `sphere_histogram_final_*_boundaries.pdf` — final histogram with MLP decision boundaries
-- `sphere_trajectory_*.pdf` — 3D trajectory plot (linear time scale)
-- `sphere_trajectory_*_log.pdf` — 3D trajectory plot (log time scale)
+- `sphere/mlp_potential.pdf` — MLP potential surface (gradient MLP only)
+- `sphere/init_{null,mlp}.pdf` — initial particle configuration
+- `sphere/middle_{null,mlp}.pdf` — mid-evolution snapshot
+- `sphere/final_{null,mlp}.pdf` — final configuration
+- `hist/init_{null,mlp}.pdf` — 3D bar histogram at initial time
+- `hist/middle_{null,mlp}.pdf` — 3D bar histogram at middle time
+- `hist/final_{null,mlp}.pdf` — 3D bar histogram at final time
+- `hist/final_mlp_boundaries.pdf` — final histogram with MLP decision boundaries
+- `sphere/trajectory_{null,mlp}.pdf` — 3D trajectory plot (linear time scale, if `pdf_trajectory=true`)
+- `sphere/trajectory_{null,mlp}_log.pdf` — 3D trajectory plot (log time scale, if `pdf_trajectory=true`)
 - `sphere_evolution.gif` — animated sphere evolution (if `gif_sphere=true`)
 - `sphere_histogram.gif` — animated histogram (if `gif_histogram=true`)
 - `sphere_views.html` — interactive 3D visualization with:
@@ -141,11 +151,18 @@ produces its own run folder.
 ### summary.json contents
 
 Each beta's `summary.json` includes:
-- `beta`, `sqrt_beta` — inverse temperature
-- `null_counts`, `mlp_counts` — final cluster counts
-- `null_stop_reasons`, `mlp_stop_reasons` — how simulation ended (`"convergence"`, `"max_steps"`, `"mlp_time"`)
+- `beta`, `sqrt_beta`, `params_json` — run metadata
+- `null_counts`, `mlp_counts`, `null_mode_counts`, `mlp_mode_counts` — final cluster statistics
+- `null_mass_counts`, `mlp_mass_counts` — clusters above mass threshold (S¹)
+- `null_cluster_masses`, `mlp_cluster_masses` — all cluster masses at convergence
+- `heaviest_mass_null`, `heaviest_mass_mlp` — heaviest cluster mass
+- `null_cluster_times`, `mlp_cluster_times` — convergence times
+- `positions_initial`, `positions_middle_*`, `positions_final_*` — particle positions
+- `histogram_edges`, `*_histogram_densities` — histogram bins/densities
+- `energy_times_*`, `energy_values_*` — energy time series
+- `mlp_a`, `mlp_omega`, `mlp_activation` — MLP parameters
+- `null_stop_reasons`, `mlp_stop_reasons` — termination reasons
 - `max_drift_final_null`, `max_drift_final_mlp` — max drift magnitude at stopping time
-- `positions_initial`, `positions_final_*` — particle positions for regenerating plots
 - `runtime_seconds` — wall clock time
 
 ### Experiment-level outputs
@@ -154,6 +171,11 @@ At the experiment root:
 
 - `stats/cluster_count.pdf` — cluster count vs √β (MLP only)
 - `stats/cluster_count_with_null.pdf` — cluster count vs √β (MLP + null)
+- `stats/mass_count.pdf` — mass-count vs √β (MLP only, S¹)
+- `stats/mass_count_with_null.pdf` — mass-count vs √β (MLP + null, S¹)
+- `stats/heaviest_mass.pdf` — heaviest (and smallest non-spurious) cluster masses vs √β
+- `stats/all_masses.pdf` — all cluster masses vs √β
+- `stats/energy_overlay*.pdf` — energy overlays across betas (linear/log, with/without legend)
 - `mlp_scale_sweep.json` — when `mlp_scale` is a list
 
 ## Resuming Experiments

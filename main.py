@@ -15,7 +15,7 @@ def _config_dimension(path: Path) -> int:
     try:
         return int(data.get("dimension", 2))
     except (TypeError, ValueError):
-        return 2
+        return 2 
 
 
 def main() -> None:
