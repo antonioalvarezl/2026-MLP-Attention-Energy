@@ -132,7 +132,7 @@ def _attention_drift_vectors(
 
     weighted_sum = weights @ x_particles
     dot_sum = (weights * dots).sum(axis=1, keepdims=True)
-    numerator = dot_sum * x_eval - weighted_sum
+    numerator = weighted_sum - dot_sum * x_eval
 
     if mode == "normalized":
         denom = np.maximum(weights.sum(axis=1, keepdims=True), 1e-12)
@@ -161,8 +161,7 @@ def attention_drift_particles_vectors(
 def mlp_drift_vectors(x: NDArray[np.float64], params: MLPParams) -> NDArray[np.float64]:
     """Compute the MLP drift contribution as a tangent vector field.
     
-    Returns -∇E_mlp (negative gradient of MLP energy), consistent with
-    attention_drift which also returns -∇E_att.
+    Returns the tangent projection of ∇E_mlp (gradient of MLP energy).
     """
     z = x @ params.a.T
     act = _activation(z, params.activation)
