@@ -107,6 +107,15 @@ See `CONFIG.md` for all configuration options and valid values.
 python3 main.py
 ```
 
+
+### Seeds used in our runs
+
+For our experiments we typically set:
+
+- `particle_seed = 42` (data/particles)
+- `mlp_seed = 777` for S^1
+- `mlp_seed = 111` for S^2
+
 ## Outputs
 
 Outputs are written under `results/experiment_YYYYMMDD_HHMMSS`. Each beta
