@@ -2,6 +2,6 @@
 
 ![Demo](../examples/USAS2.gif)
 
-**Unnormalized self-attention + Gradient Descent (GeLU)**
+**Unnormalized self-attention + Gradient Descent (ReLU)**
 
 ![Demo](../examples/USAdS2.gif)
