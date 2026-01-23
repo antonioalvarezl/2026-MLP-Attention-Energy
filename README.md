@@ -4,7 +4,7 @@ This repo simulates transformer-style dynamics (self-attention + MLP) on compact
 manifolds, interpreted as Wasserstein gradient flows. Two geometries are supported:
 
 - **S¹ (circle)** 
-- **S² (sphere)** (animations inside the folder \texttt{wgf_sphere)}
+- **S² (sphere)** (animations inside the folder wgf_sphere)
 
 **Unnormalized self-attention + Gradient Ascent (ReLU)**
 
