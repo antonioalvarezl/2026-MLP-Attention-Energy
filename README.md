@@ -13,11 +13,11 @@ manifolds, interpreted as Wasserstein gradient flows. Two geometries are support
 **Normalized self-attention + Gradient Ascent (ReLU)**
 ![Demo](examples/SA.gif)
 
-**Unnormalized self-attention + Gradient Descent (GeLU)**
+**Unnormalized self-attention + Gradient Descent (ReLU)**
 
 ![Demo](examples/USAd.gif)
 
-**Normalized self-attention + Gradient Descent (GeLU)**
+**Normalized self-attention + Gradient Descent (ReLU)**
 
 ![Demo](examples/SAd.gif)
 
