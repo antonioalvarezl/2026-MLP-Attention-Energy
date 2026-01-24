@@ -1312,44 +1312,63 @@ def make_all_masses_figure(
     mlp_omega: Optional[np.ndarray] = None,
     mlp_activation: Optional[str] = None,
     mlp_color: str = MLP_COLOR,
-    theory_color: str = "#D55E00",
-    point_alpha: float = 0.6,
+    theory_color: str = "#bcbd22",
+    point_alpha: float = 1.0,
 ) -> plt.Figure:
     """Plot all cluster masses vs sqrt(beta)."""
     fig, ax = plt.subplots(figsize=(5, 3.5))
 
     sqrt_betas = np.sqrt(betas)
-    jitter_width = 0.015
-    for x, masses in zip(sqrt_betas, all_masses):
+    masses_by_beta = []
+    max_count = 0
+    for masses in all_masses:
         masses_arr = np.asarray(masses, dtype=float).ravel()
         masses_arr = masses_arr[np.isfinite(masses_arr)]
-        if masses_arr.size == 0:
-            continue
-        if masses_arr.size == 1:
-            x_vals = np.array([x])
-        else:
-            jitter = np.linspace(-jitter_width, jitter_width, masses_arr.size)
-            x_vals = x + jitter
-        ax.scatter(
-            x_vals,
-            masses_arr,
-            s=10,
-            color=mlp_color,
-            alpha=point_alpha,
-            linewidths=0.0,
-        )
+        if masses_arr.size:
+            masses_arr = np.sort(masses_arr)[::-1]
+        masses_by_beta.append(masses_arr)
+        max_count = max(max_count, masses_arr.size)
+
+    if max_count:
+        mass_matrix = np.full((len(betas), max_count), np.nan, dtype=float)
+        for i, masses_arr in enumerate(masses_by_beta):
+            if masses_arr.size:
+                mass_matrix[i, : masses_arr.size] = masses_arr
+        for j in range(max_count):
+            y_vals = mass_matrix[:, j]
+            mask = np.isfinite(y_vals)
+            if np.any(mask):
+                line_width = 1.8 if j == 0 else 0.8
+                marker = "o" if j == 0 else "^"
+                marker_size = 3 if j == 0 else 2
+                ax.plot(
+                    sqrt_betas[mask],
+                    y_vals[mask],
+                    marker=marker,
+                    linestyle="-",
+                    color=mlp_color,
+                    markersize=marker_size,
+                    linewidth=line_width,
+                    alpha=point_alpha,
+                )
 
     if mlp_a is not None and mlp_omega is not None and mlp_activation is not None:
         c_theta = compute_c_theta(mlp_a, mlp_omega, mlp_activation)
         theory_values = np.array([theoretical_heaviest_mass_bound(b, c_theta) for b in betas])
-        ax.plot(sqrt_betas, theory_values, "^--", color=theory_color, markersize=3, linewidth=1.0)
+        ax.plot(sqrt_betas, theory_values, "^--", color=theory_color, markersize=3, linewidth=1.8)
 
     constant_threshold = 16.0 / (16.0 + 3.0 * np.exp(11.0 / 8.0))
-    ax.axhline(y=constant_threshold, color="black", linestyle="--", linewidth=1.0)
+    ax.axhline(y=constant_threshold, color="black", linestyle="--", linewidth=1.2)
 
     ax.set_xlabel(r"$\sqrt{\beta}$")
     ax.set_ylabel(r"mass")
-    ax.set_ylim(0.0, 1.05)
+
+    y_values = [constant_threshold]
+    for masses_arr in masses_by_beta:
+        if masses_arr.size:
+            y_values.append(np.min(masses_arr))
+    y_min = min(y_values) - 0.05 if y_values else 0.0
+    ax.set_ylim(y_min, 1.05)
     ax.tick_params(axis="both", which="major", labelsize=9)
     ax.tick_params(axis="both", which="minor", labelsize=7)
 
