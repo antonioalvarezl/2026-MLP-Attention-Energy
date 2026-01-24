@@ -315,95 +315,6 @@ def _save_s2_evolution_gif(
                 pass
 
 
-def _save_s2_histogram_gif(
-    output_path: Path,
-    times: np.ndarray,
-    history: np.ndarray,
-    interval: float,
-    frame_limit: Optional[int],
-    color: str,
-    potential_params: Optional[tuple[np.ndarray, np.ndarray, str]],
-    show_potential: bool,
-    title: str = "",
-) -> None:
-    frame_times, _, _ = _frame_indices(times, times, interval, frame_limit)
-    if frame_times.size == 0:
-        return
-
-    try:
-        from PIL import Image
-    except Exception:
-        print("Warning: PIL not available; skipping S2 histogram GIF.")
-        return
-
-    bins = 36
-    z_max = 0.0
-    scale_iter = range(len(frame_times))
-    if len(frame_times) > 1:
-        scale_iter = iter_progress(
-            range(len(frame_times)),
-            label=f"Scale {output_path.stem}",
-            unit="frame",
-        )
-    for frame_idx in scale_iter:
-        t = float(frame_times[frame_idx])
-        points = _interpolate_positions(times, history, t)
-        z_max = max(z_max, s2_histogram_max_count(points, bins=bins))
-    if z_max <= 0.0:
-        z_max = 1.0
-
-    gif_images = []
-    writer = None
-    try:
-        import imageio.v2 as imageio
-    except Exception:
-        imageio = None
-    if imageio is not None:
-        try:
-            writer = imageio.get_writer(output_path, mode="I", duration=interval)
-        except Exception:
-            writer = None
-    frame_iter = iter_progress(range(len(frame_times)), label=f"GIF {output_path.stem}", unit="frame")
-    try:
-        for frame_idx in frame_iter:
-            t = float(frame_times[frame_idx])
-            points = _interpolate_positions(times, history, t)
-            fig = make_s2_histogram_bar_figure(
-                points,
-                color,
-                bins=bins,
-                potential_params=potential_params,
-                show_potential=show_potential,
-                z_max=z_max,
-                title=title,
-            )
-            buf = io.BytesIO()
-            fig.savefig(buf, format="png", dpi=120)
-            buf.seek(0)
-            img = Image.open(buf).convert("RGBA")
-            if writer is not None:
-                writer.append_data(np.asarray(img))
-            else:
-                gif_images.append(img.copy())
-            img.close()
-            buf.close()
-            import matplotlib.pyplot as plt
-
-            plt.close(fig)
-    finally:
-        if writer is not None:
-            writer.close()
-
-    if writer is None:
-        if not save_gif_from_images(gif_images, output_path, interval):
-            print(f"Warning: GIF not generated for {output_path.name}.")
-        for img in gif_images:
-            try:
-                img.close()
-            except Exception:
-                pass
-
-
 def _save_s2_histogram_comparison_gif(
     output_path: Path,
     times_null: np.ndarray,
@@ -756,6 +667,59 @@ def _load_scale_summaries(
     return entries
 
 
+_SNAPSHOT_FRACTIONS = {
+    "init": 0.0,
+    "q1": 0.25,
+    "middle": 0.5,
+    "q3": 0.75,
+    "final": 1.0,
+}
+_SNAPSHOT_LABELS = ("init", "q1", "middle", "q3", "final")
+
+
+def _snapshot_index(length: int, label: str) -> int:
+    if length <= 0:
+        return 0
+    frac = _SNAPSHOT_FRACTIONS.get(label)
+    if frac is None:
+        raise ValueError(f"Unknown snapshot label: {label}")
+    idx = int(round(frac * (length - 1)))
+    return int(np.clip(idx, 0, length - 1))
+
+
+def _snapshot_points(
+    history: Optional[np.ndarray],
+    label: str,
+    fallback: Optional[np.ndarray],
+    initial: Optional[np.ndarray] = None,
+) -> Optional[np.ndarray]:
+    if label == "init" and initial is not None:
+        return initial
+    if history is None or history.size == 0:
+        return fallback
+    idx = _snapshot_index(len(history), label)
+    return history[idx]
+
+
+def _select_sparse_snapshots(
+    sparse_snapshots: list[tuple[int, float, np.ndarray]],
+    target_steps: list[int],
+) -> list[tuple[float, np.ndarray]]:
+    if not sparse_snapshots or not target_steps:
+        return []
+    steps = np.array([item[0] for item in sparse_snapshots], dtype=float)
+    chosen: list[tuple[float, np.ndarray]] = []
+    used: set[int] = set()
+    for target in target_steps:
+        idx = int(np.argmin(np.abs(steps - target)))
+        if idx in used:
+            continue
+        used.add(idx)
+        _, time_val, snapshot = sparse_snapshots[idx]
+        chosen.append((time_val, snapshot))
+    return chosen
+
+
 def _simulate_until_convergence_s2(
     x0: np.ndarray,
     sim_config: SimulationConfig,
@@ -769,7 +733,10 @@ def _simulate_until_convergence_s2(
     progress_every: Optional[int] = None,
     save_history: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, int, str]:
-    """Simulate until convergence. If save_history=False, keeps initial, middle, and final states."""
+    """Simulate until convergence.
+
+    If save_history=False, keeps initial, quarter, middle, three-quarter, and final states.
+    """
     x = x0.astype(np.float64, copy=True)
     times = [0.0]
     history = [x.copy()]
@@ -779,7 +746,7 @@ def _simulate_until_convergence_s2(
             progress_every = max(1, max_steps // 100)
         progress(0, max_steps)
 
-    # For save_history=False, we track snapshots at 25%, 50%, 75% to pick middle later
+    # For save_history=False, we track sparse snapshots to recover quarter/middle/three-quarter later.
     sparse_snapshots = []  # [(step, time, snapshot), ...]
     last_saved_step = 0
 
@@ -815,12 +782,15 @@ def _simulate_until_convergence_s2(
                 if progress is not None:
                     progress(step, max_steps)
                 if not save_history:
-                    # Pick the middle snapshot from sparse_snapshots
-                    if sparse_snapshots:
-                        mid_idx = len(sparse_snapshots) // 2
-                        _, mid_time, mid_snap = sparse_snapshots[mid_idx]
-                        times.append(mid_time)
-                        history.append(mid_snap)
+                    target_steps = [
+                        int(round(step * frac))
+                        for frac in (0.25, 0.5, 0.75)
+                        if 1 <= int(round(step * frac)) < step
+                    ]
+                    target_steps = sorted(set(target_steps))
+                    for time_val, snap in _select_sparse_snapshots(sparse_snapshots, target_steps):
+                        times.append(time_val)
+                        history.append(snap)
                     times.append(step * sim_config.dt)
                     history.append(x.copy())
                 return np.asarray(times), np.asarray(history), step, "convergence"
@@ -829,12 +799,15 @@ def _simulate_until_convergence_s2(
             progress(step, max_steps)
 
     if not save_history:
-        # Pick the middle snapshot from sparse_snapshots
-        if sparse_snapshots:
-            mid_idx = len(sparse_snapshots) // 2
-            _, mid_time, mid_snap = sparse_snapshots[mid_idx]
-            times.append(mid_time)
-            history.append(mid_snap)
+        target_steps = [
+            int(round(max_steps * frac))
+            for frac in (0.25, 0.5, 0.75)
+            if 1 <= int(round(max_steps * frac)) < max_steps
+        ]
+        target_steps = sorted(set(target_steps))
+        for time_val, snap in _select_sparse_snapshots(sparse_snapshots, target_steps):
+            times.append(time_val)
+            history.append(snap)
         times.append(max_steps * sim_config.dt)
         history.append(x.copy())
     return np.asarray(times), np.asarray(history), max_steps, "max_steps"
@@ -1048,9 +1021,9 @@ def run_experiment_s2(config: RunConfig) -> None:
                 if idx == 0:
                     example_null_final = points_hist[-1]
                     example_null_times = times
-                    # For infinite sims with save_history=False, points_hist has [initial, middle, final]
-                    # which is small enough to keep for middle extraction
-                    example_null_hist = points_hist if (need_full_history or (is_infinite and len(points_hist) <= 4)) else None
+                    # For save_history=False, points_hist has [initial, q1, middle, q3, final],
+                    # which is small enough to keep for snapshot extraction.
+                    example_null_hist = points_hist if (need_full_history or (is_infinite and len(points_hist) <= 6)) else None
                 # Discard history for non-first runs to save memory
                 del points_hist, times
 
@@ -1174,9 +1147,9 @@ def run_experiment_s2(config: RunConfig) -> None:
                     if i == 0 and j == 0:
                         example_mlp_final = points_hist[-1]
                         example_mlp_times = times
-                        # For infinite sims with save_history=False, points_hist has [initial, middle, final]
-                        # which is small enough to keep for middle extraction
-                        example_mlp_hist = points_hist if (need_full_history or (is_infinite and len(points_hist) <= 4)) else None
+                        # For save_history=False, points_hist has [initial, q1, middle, q3, final],
+                        # which is small enough to keep for snapshot extraction.
+                        example_mlp_hist = points_hist if (need_full_history or (is_infinite and len(points_hist) <= 6)) else None
                     # Discard history for non-first runs to save memory
                     del points_hist, times
 
@@ -1236,9 +1209,9 @@ def run_experiment_s2(config: RunConfig) -> None:
                     if idx == 0:
                         example_null_final = points_hist[-1]
                         example_null_times = times
-                        # When save_history=False, points_hist has [initial, middle, final]
-                        # which is small enough to keep for middle extraction
-                        example_null_hist = points_hist if (need_full_history or len(points_hist) <= 4) else None
+                        # When save_history=False, points_hist has [initial, q1, middle, q3, final]
+                        # which is small enough to keep for snapshot extraction.
+                        example_null_hist = points_hist if (need_full_history or len(points_hist) <= 6) else None
                     # Discard history for non-first runs to save memory
                     del points_hist, times
 
@@ -1274,14 +1247,10 @@ def run_experiment_s2(config: RunConfig) -> None:
             run_seconds = time.perf_counter() - run_start
             
             # Compute middle positions for summary (before generating images)
-            if example_null_hist is not None and len(example_null_hist) > 1:
-                mid_null = example_null_hist[len(example_null_hist) // 2]
-            else:
-                mid_null = example_null_final
-            if example_mlp_hist is not None and len(example_mlp_hist) > 1:
-                mid_mlp = example_mlp_hist[len(example_mlp_hist) // 2]
-            else:
-                mid_mlp = example_mlp_final if example_mlp_final is not None else mid_null
+            mid_null = _snapshot_points(example_null_hist, "middle", example_null_final, example_initial)
+            mid_mlp = _snapshot_points(example_mlp_hist, "middle", example_mlp_final, example_initial)
+            if mid_mlp is None:
+                mid_mlp = mid_null
             
             # Compute max drift at convergence for null model
             max_drift_null_list = []
@@ -1416,118 +1385,74 @@ def run_experiment_s2(config: RunConfig) -> None:
                     save_figure(fig, sphere_dir / "mlp_potential", formats=("pdf",))
                     plt.close(fig)
                 
-                # ---------- SPHERE figures at initial, middle, final ----------
-                fig = make_s2_single_figure(
-                    example_initial,
-                    NULL_COLOR,
-                    potential_params=None,
-                    show_potential=False,
-                    point_size=10.0,
-                )
-                save_figure(fig, sphere_dir / "init_null", formats=("pdf",))
-                plt.close(fig)
-                fig = make_s2_single_figure(
-                    example_initial,
-                    mlp_color,
-                    potential_params=potential_params,
-                    show_potential=config.gradient_mlp,
-                    point_size=10.0,
-                )
-                save_figure(fig, sphere_dir / "init_mlp", formats=("pdf",))
-                plt.close(fig)
-                # mid_null and mid_mlp already computed before _write_run_summary
-                fig = make_s2_single_figure(
-                    mid_null,
-                    NULL_COLOR,
-                    potential_params=None,
-                    show_potential=False,
-                    point_size=10.0,
-                )
-                save_figure(fig, sphere_dir / "middle_null", formats=("pdf",))
-                plt.close(fig)
-                fig = make_s2_single_figure(
-                    mid_mlp,
-                    mlp_color,
-                    potential_params=potential_params,
-                    show_potential=config.gradient_mlp,
-                    point_size=10.0,
-                )
-                save_figure(fig, sphere_dir / "middle_mlp", formats=("pdf",))
-                plt.close(fig)
-                fig = make_s2_single_figure(
-                    example_null_final,
-                    NULL_COLOR,
-                    potential_params=None,
-                    show_potential=False,
-                    point_size=10.0,
-                )
-                save_figure(fig, sphere_dir / "final_null", formats=("pdf",))
-                plt.close(fig)
-                fig = make_s2_single_figure(
-                    example_mlp_final,
-                    mlp_color,
-                    potential_params=potential_params,
-                    show_potential=config.gradient_mlp,
-                    point_size=10.0,
-                )
-                save_figure(fig, sphere_dir / "final_mlp", formats=("pdf",))
-                plt.close(fig)
-                # ---------- HISTOGRAMS at initial, middle, final ----------
-                # Initial histograms
-                fig = make_s2_histogram_bar_figure(
-                    example_initial,
-                    NULL_COLOR,
-                    potential_params=None,
-                    show_potential=False,
-                )
-                save_figure(fig, hist_dir / "init_null", formats=("pdf",))
-                plt.close(fig)
-                fig = make_s2_histogram_bar_figure(
-                    example_initial,
-                    mlp_color,
-                    potential_params=potential_params,
-                    show_potential=config.gradient_mlp,
-                    show_decision_boundaries=False,
-                )
-                save_figure(fig, hist_dir / "init_mlp", formats=("pdf",))
-                plt.close(fig)
-                # Middle histograms
-                fig = make_s2_histogram_bar_figure(
-                    mid_null,
-                    NULL_COLOR,
-                    potential_params=None,
-                    show_potential=False,
-                )
-                save_figure(fig, hist_dir / "middle_null", formats=("pdf",))
-                plt.close(fig)
-                fig = make_s2_histogram_bar_figure(
-                    mid_mlp,
-                    mlp_color,
-                    potential_params=potential_params,
-                    show_potential=config.gradient_mlp,
-                    show_decision_boundaries=False,
-                )
-                save_figure(fig, hist_dir / "middle_mlp", formats=("pdf",))
-                plt.close(fig)
-                # Final histograms
-                fig = make_s2_histogram_bar_figure(
-                    example_null_final,
-                    NULL_COLOR,
-                    potential_params=None,
-                    show_potential=False,
-                )
-                save_figure(fig, hist_dir / "final_null", formats=("pdf",))
-                plt.close(fig)
-                # Without decision boundaries
-                fig = make_s2_histogram_bar_figure(
-                    example_mlp_final,
-                    mlp_color,
-                    potential_params=potential_params,
-                    show_potential=config.gradient_mlp,
-                    show_decision_boundaries=False,
-                )
-                save_figure(fig, hist_dir / "final_mlp", formats=("pdf",))
-                plt.close(fig)
+                # ---------- SPHERE figures at init, q1, middle, q3, final ----------
+                for label in _SNAPSHOT_LABELS:
+                    null_points = _snapshot_points(
+                        example_null_hist,
+                        label,
+                        example_null_final,
+                        example_initial,
+                    )
+                    mlp_points = _snapshot_points(
+                        example_mlp_hist,
+                        label,
+                        example_mlp_final,
+                        example_initial,
+                    )
+                    if null_points is not None:
+                        fig = make_s2_single_figure(
+                            null_points,
+                            NULL_COLOR,
+                            potential_params=None,
+                            show_potential=False,
+                            point_size=10.0,
+                        )
+                        save_figure(fig, sphere_dir / f"{label}_null", formats=("pdf",))
+                        plt.close(fig)
+                    if mlp_points is not None:
+                        fig = make_s2_single_figure(
+                            mlp_points,
+                            mlp_color,
+                            potential_params=potential_params,
+                            show_potential=config.gradient_mlp,
+                            point_size=10.0,
+                        )
+                        save_figure(fig, sphere_dir / f"{label}_mlp", formats=("pdf",))
+                        plt.close(fig)
+
+                # ---------- HISTOGRAMS at init, q1, middle, q3, final ----------
+                for label in _SNAPSHOT_LABELS:
+                    null_points = _snapshot_points(
+                        example_null_hist,
+                        label,
+                        example_null_final,
+                        example_initial,
+                    )
+                    mlp_points = _snapshot_points(
+                        example_mlp_hist,
+                        label,
+                        example_mlp_final,
+                        example_initial,
+                    )
+                    if null_points is not None:
+                        fig = make_s2_histogram_bar_figure(
+                            null_points,
+                            NULL_COLOR,
+                            potential_params=None,
+                            show_potential=False,
+                        )
+                        save_figure(fig, hist_dir / f"{label}_null", formats=("pdf",))
+                        plt.close(fig)
+                    if mlp_points is not None:
+                        fig = make_s2_histogram_bar_figure(
+                            mlp_points,
+                            mlp_color,
+                            potential_params=potential_params,
+                            show_potential=config.gradient_mlp,
+                            show_decision_boundaries=False,
+                        )
+                        save_figure(fig, hist_dir / f"{label}_mlp", formats=("pdf",))
+                        plt.close(fig)
                 # With decision boundaries
                 fig = make_s2_histogram_bar_figure(
                     example_mlp_final,

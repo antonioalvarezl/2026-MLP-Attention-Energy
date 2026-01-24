@@ -449,7 +449,7 @@ def _plot_s2_trajectories(
     line_width: float = 0.6,
     alpha: float = 0.65,
     z_aspect: float = 2.2,
-    target_steps: int = 3000,
+    target_steps: int = 1200,
     time_scale: str = "linear",
 ) -> None:
     """Plot particle trajectories on S2 projected to square coordinates.
@@ -495,7 +495,7 @@ def _plot_s2_trajectories(
         z_min = t_min_orig
         z_max = t_max_orig
 
-    jump_thresh = np.pi
+    jump_thresh = 0.85 * np.pi
     for p_idx in range(phi.shape[1]):
         phi_p = phi[:, p_idx]
         theta_p = theta[:, p_idx]
@@ -564,7 +564,7 @@ def make_s2_trajectory_figure(
     times: np.ndarray,
     color: str,
     z_aspect: float = 2.2,
-    target_steps: int = 3000,
+    target_steps: int = 1200,
     time_scale: str = "linear",
 ) -> "plt.Figure":
     import matplotlib.pyplot as plt
@@ -582,29 +582,6 @@ def make_s2_trajectory_figure(
         time_scale=time_scale,
     )
     fig.subplots_adjust(left=0.05, right=0.95, bottom=0.05, top=0.95)
-    return fig
-
-
-def make_s2_trajectory_comparison_figure(
-    points_null_hist: np.ndarray,
-    times_null: np.ndarray,
-    points_mlp_hist: np.ndarray,
-    times_mlp: np.ndarray,
-    null_color: str,
-    mlp_color: str,
-    title: str = "",
-    time_scale: str = "linear",
-) -> "plt.Figure":
-    import matplotlib.pyplot as plt
-    import mpl_toolkits.mplot3d
-
-    fig = plt.figure(figsize=(14.0, 7.0))
-    ax_null = fig.add_subplot(1, 2, 1, projection="3d")
-    ax_mlp = fig.add_subplot(1, 2, 2, projection="3d")
-
-    _plot_s2_trajectories(ax_null, points_null_hist, times_null, null_color, z_aspect=1.4, time_scale=time_scale)
-    _plot_s2_trajectories(ax_mlp, points_mlp_hist, times_mlp, mlp_color, z_aspect=1.4, time_scale=time_scale)
-    fig.subplots_adjust(left=0.04, right=0.96, bottom=0.04, top=0.96, wspace=0.16)
     return fig
 
 

@@ -230,7 +230,8 @@ def simulate_positions(
 ) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Run integration and return (times, position_history).
     
-    If save_history=False, returns initial, middle, and final states to save memory.
+    If save_history=False, returns initial, quarter, middle, three-quarter, and final states
+    to save memory.
     """
     x = _normalize_rows(x0.astype(np.float64, copy=True))
 
@@ -247,10 +248,16 @@ def simulate_positions(
             progress_every = max(1, sim_config.num_steps // 100)
         progress(0, sim_config.num_steps)
 
-    # For save_history=False, track middle snapshot
-    mid_step = sim_config.num_steps // 2
-    mid_snapshot = None
-    mid_time = None
+    target_steps: list[int] = []
+    snapshot_times: dict[int, float] = {}
+    snapshot_points: dict[int, NDArray[np.float64]] = {}
+    if not save_history:
+        max_step = sim_config.num_steps
+        for frac in (0.25, 0.5, 0.75):
+            step = int(round(frac * max_step))
+            if 1 <= step < max_step:
+                target_steps.append(step)
+        target_steps = sorted(set(target_steps))
 
     for step in range(1, sim_config.num_steps + 1):
         x = step_positions(x, sim_config, mlp_params)
@@ -258,19 +265,18 @@ def simulate_positions(
         if save_history and (step % sim_config.save_every == 0 or step == sim_config.num_steps):
             times.append(step * sim_config.dt)
             history.append(x.copy())
-        elif not save_history and step == mid_step:
-            # Save middle snapshot
-            mid_snapshot = x.copy()
-            mid_time = step * sim_config.dt
+        elif not save_history and step in target_steps:
+            snapshot_times[step] = step * sim_config.dt
+            snapshot_points[step] = x.copy()
 
         if progress is not None and (step % progress_every == 0 or step == sim_config.num_steps):
             progress(step, sim_config.num_steps)
 
     if not save_history:
-        # Add middle state (if we captured one)
-        if mid_snapshot is not None:
-            times.append(mid_time)
-            history.append(mid_snapshot)
+        for step in target_steps:
+            if step in snapshot_points:
+                times.append(snapshot_times[step])
+                history.append(snapshot_points[step])
         # Add final state
         times.append(sim_config.num_steps * sim_config.dt)
         history.append(x.copy())
