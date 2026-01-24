@@ -9,7 +9,6 @@ from typing import List, Optional
 from numpy.typing import NDArray
 import matplotlib as mpl
 import numpy as np
-from scipy.interpolate import CubicSpline
 from scipy.special import iv
 
 ROOT = Path(__file__).resolve().parent
@@ -50,6 +49,7 @@ from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm, to_rgb
 from matplotlib.ticker import MaxNLocator
 from matplotlib.patches import Wedge
 from scipy.special import erf
+from scipy.ndimage import gaussian_filter
 
 from .dynamics import TWO_PI, mlp_drift
 
@@ -105,40 +105,6 @@ def plot_gamma(ax, beta: float, k_limit: int, k_max: int) -> None:
     ax.set_xlim(0.0, k_display_max)
 
 
-def _density_grid(
-    times: np.ndarray,
-    theta_hist: np.ndarray,
-    angle_bins: int,
-    time_bins: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    time_bins = min(time_bins, len(times))
-    time_edges = np.linspace(times[0], times[-1], time_bins + 1)
-    angle_edges = np.linspace(0.0, TWO_PI, angle_bins + 1)
-
-    t_grid = np.repeat(times, theta_hist.shape[1])
-    a_grid = theta_hist.reshape(-1)
-    hist, _, _ = np.histogram2d(t_grid, a_grid, bins=[time_edges, angle_edges])
-    return time_edges, angle_edges, hist
-
-
-def _density_by_bin(
-    times: np.ndarray,
-    theta_hist: np.ndarray,
-    angle_bins: int,
-    time_bins: int,
-) -> np.ndarray:
-    time_edges, angle_edges, hist = _density_grid(times, theta_hist, angle_bins, time_bins)
-
-    t_grid = np.repeat(times, theta_hist.shape[1])
-    a_grid = theta_hist.reshape(-1)
-    t_idx = np.searchsorted(time_edges, t_grid, side="right") - 1
-    a_idx = np.searchsorted(angle_edges, a_grid, side="right") - 1
-    t_idx = np.clip(t_idx, 0, hist.shape[0] - 1)
-    a_idx = np.clip(a_idx, 0, hist.shape[1] - 1)
-
-    return hist[t_idx, a_idx]
-
-
 def _split_wrapped_segment(
     t0: float,
     a0: float,
@@ -170,26 +136,6 @@ def _split_wrapped_segment(
     ]
 
 
-def _circular_mean(angles: np.ndarray) -> float:
-    if angles.size == 0:
-        return 0.0
-    sin_mean = float(np.mean(np.sin(angles)))
-    cos_mean = float(np.mean(np.cos(angles)))
-    if abs(sin_mean) < 1e-12 and abs(cos_mean) < 1e-12:
-        return 0.0
-    mean = np.arctan2(sin_mean, cos_mean)
-    if mean < 0.0:
-        mean += TWO_PI
-    return mean
-
-
-def _align_unwrapped(angles_unwrapped: np.ndarray, reference: float) -> np.ndarray:
-    if angles_unwrapped.size == 0:
-        return angles_unwrapped
-    shift = TWO_PI * np.round((reference - angles_unwrapped[-1]) / TWO_PI)
-    return angles_unwrapped + shift
-
-
 def plot_trajectories(
     ax,
     times: np.ndarray,
@@ -197,13 +143,13 @@ def plot_trajectories(
     color: str,
     angle_bins: int = 360,
     time_bins: int = 200,
-    max_particles: int = 150,
-    time_stride: int = 2,
+    max_particles: int = 250,
+    time_stride: int = 1,
     time_scale: str = "linear",
-    line_width: float = 0.8,
+    line_width: float = 0.5,
     line_style: Optional[object] = None,
 ) -> None:
-    # Subsample trajectories and shade by local density.
+    """Plot particle trajectories with smooth interpolation and density coloring."""
     if time_stride < 1:
         time_stride = 1
     times_plot = np.asarray(times, dtype=float)
@@ -221,88 +167,133 @@ def plot_trajectories(
     max_particles = max(1, max_particles)
     step = max(1, n_particles // max_particles)
     particle_idx = np.arange(0, n_particles, step)[:max_particles]
-    ref_angle = _circular_mean(theta_hist[-1])
-
-    base = np.array(to_rgb(color))
-    line_color = 0.7 * base + 0.3
-    line_alpha = 1.0
-    min_mix = 0.25
-    density_gamma = 0.7
+    
+    base_color = np.array(to_rgb(color))
+    
+    # Compute smooth density field for coloring
+    density_func = None
+    use_density = False
+    
+    if len(times_s) > 5 and n_particles > 20:
+        from scipy.interpolate import RegularGridInterpolator
+        
+        # Create a smooth density field on a regular grid
+        n_time_grid = min(80, len(times_s))
+        n_angle_grid = 100
+        
+        time_grid = np.linspace(times_s[0], times_s[-1], n_time_grid)
+        angle_grid = np.linspace(0, TWO_PI, n_angle_grid, endpoint=False)
+        
+        density_field = np.zeros((n_time_grid, n_angle_grid))
+        
+        # Compute density using kernel smoothing
+        sigma_angle = TWO_PI / 15.0  # Smoothness in angle
+        
+        for t_idx, t_val in enumerate(time_grid):
+            # Find closest time index in original data
+            orig_idx = np.argmin(np.abs(times_s - t_val))
+            particles_at_t = theta_s[orig_idx, :] % TWO_PI
+            
+            for a_idx, angle in enumerate(angle_grid):
+                # Circular distance
+                diff = particles_at_t - angle
+                diff = np.arctan2(np.sin(diff), np.cos(diff))
+                
+                # Gaussian kernel
+                weights = np.exp(-0.5 * (diff / sigma_angle) ** 2)
+                density_field[t_idx, a_idx] = weights.mean()
+        
+        # Heavy 2D Gaussian smoothing for truly smooth field
+        density_field = gaussian_filter(density_field, sigma=[2.5, 3.0], mode='wrap')
+        
+        # Create interpolator (regular grid is much faster than RBF)
+        density_func = RegularGridInterpolator(
+            (time_grid, angle_grid),
+            density_field,
+            method='cubic',
+            bounds_error=False,
+            fill_value=None
+        )
+        
+        # Check variation
+        density_range = np.max(density_field) - np.min(density_field)
+        use_density = density_range > 0.05 * np.max(density_field)
+        
+        d_min = np.min(density_field)
+        d_max = np.max(density_field)
+    
+    # Interpolate trajectories for smoothness
+    if len(times_s) > 2:
+        from scipy.interpolate import interp1d
+        n_interp = min(len(times_s) * 10, 2000)
+        if time_scale == "log":
+            times_interp = np.geomspace(times_s[0], times_s[-1], n_interp)
+        else:
+            times_interp = np.linspace(times_s[0], times_s[-1], n_interp)
+    else:
+        times_interp = times_s
+    
     segments = []
     colors = []
+    
+    unwrap_discont = 0.95 * np.pi
+    min_mix = 0.2
+    density_gamma = 0.5
 
-    density_sel = None
-    density_min = 1.0
-    density_max = 1.0
-    use_density = False
-    if times_s.size > 0 and n_particles > 0:
-        # Compute smooth density using a von Mises kernel instead of discrete bins
-        # This avoids the "staircase" artifacts when particles cluster
-        theta_mod = np.mod(theta_s, TWO_PI)
-        kappa = 50.0  # concentration parameter (higher = sharper kernel)
-        # For each selected particle, compute its density as sum of von Mises contributions
-        theta_selected = theta_mod[:, particle_idx]  # (n_times, n_selected)
-        # Compute pairwise angular differences with all particles
-        diff = theta_mod[:, :, None] - theta_selected[:, None, :]  # (n_times, n_all, n_selected)
-        # von Mises kernel: exp(kappa * cos(diff)) normalized
-        kernel_vals = np.exp(kappa * (np.cos(diff) - 1.0))  # subtract 1 for numerical stability
-        density_sel = kernel_vals.sum(axis=1)  # (n_times, n_selected)
-        density_min = float(np.min(density_sel))
-        density_max = float(np.max(density_sel))
-        use_density = density_max > density_min
-
-    spline_target_points = 600
-    spline_min_points = 100
-    max_fit_points = 800
-    t_fit = None
-    t_smooth = None
-    fit_stride = 1
-    if times_s.size >= 4:
-        fit_stride = max(1, int(times_s.size // max_fit_points))
-        t_fit = times_s[::fit_stride]
-        if t_fit.size >= 4:
-            target = min(spline_target_points, max(spline_min_points, t_fit.size * 2))
-            if time_scale == "log":
-                t_smooth = np.geomspace(t_fit[0], t_fit[-1], target)
-            else:
-                t_smooth = np.linspace(t_fit[0], t_fit[-1], target)
-
-    for p_idx, idx in enumerate(particle_idx):
+    for idx in particle_idx:
         angles = theta_s[:, idx]
-        angles_unwrapped = np.unwrap(angles, discont=np.pi)
-        angles_unwrapped = _align_unwrapped(angles_unwrapped, ref_angle)
-        t_vals = times_s
-        density_vals = None
-        if density_sel is not None:
-            density_vals = density_sel[:, p_idx]
-        if t_fit is not None and t_smooth is not None:
-            cs = CubicSpline(t_fit, angles_unwrapped[::fit_stride], bc_type="natural")
-            angles_unwrapped = cs(t_smooth)
-            t_vals = t_smooth
-            if density_vals is not None:
-                density_fit = density_vals[::fit_stride]
-                if density_fit.size >= 2:
-                    density_vals = np.interp(t_smooth, t_fit, density_fit)
-                else:
-                    density_vals = np.full_like(t_smooth, density_fit[0] if density_fit.size else density_min)
+        angles_unwrapped = np.unwrap(angles, discont=unwrap_discont)
+        
+        # Interpolate
+        if len(times_s) > 2:
+            interp_func = interp1d(times_s, angles_unwrapped, kind='cubic', 
+                                   fill_value='extrapolate', bounds_error=False)
+            angles_interp = interp_func(times_interp)
+        else:
+            angles_interp = angles_unwrapped
+        
+        t_vals = times_interp
+        angles_vals = angles_interp
 
-        for k in range(len(angles_unwrapped) - 1):
+        for k in range(len(angles_vals) - 1):
+            # Get density-based color
+            if use_density and density_func is not None:
+                t_mid = 0.5 * (t_vals[k] + t_vals[k + 1])
+                a_mid = 0.5 * (angles_vals[k] + angles_vals[k + 1])
+                a_mid_wrapped = a_mid % TWO_PI
+                
+                try:
+                    # Query interpolated density
+                    density = density_func([[t_mid, a_mid_wrapped]])[0]
+                    
+                    # Normalize
+                    if d_max > d_min:
+                        norm = (density - d_min) / (d_max - d_min)
+                        norm = float(np.clip(norm, 0.0, 1.0))
+                    else:
+                        norm = 0.5
+                    
+                    # Gamma for perceptual uniformity
+                    norm = norm ** density_gamma
+                    mix = min_mix + (1.0 - min_mix) * norm
+                    seg_color = base_color * mix + (1.0 - mix)
+                    seg_alpha = 0.5 + 0.4 * norm
+                except Exception:
+                    seg_color = 0.65 * base_color + 0.35
+                    seg_alpha = 0.6
+            else:
+                seg_color = 0.65 * base_color + 0.35
+                seg_alpha = 0.6
+            
+            # Split at 2π boundary
             for seg in _split_wrapped_segment(
                 t_vals[k],
-                angles_unwrapped[k],
+                angles_vals[k],
                 t_vals[k + 1],
-                angles_unwrapped[k + 1],
+                angles_vals[k + 1],
             ):
                 segments.append(seg)
-                if use_density and density_vals is not None:
-                    density = density_vals[k]
-                    norm = (density - density_min) / (density_max - density_min)
-                    norm = float(np.clip(norm, 0.0, 1.0)) ** density_gamma
-                    mix = min_mix + (1.0 - min_mix) * norm
-                    seg_color = base * mix + (1.0 - mix)
-                    colors.append((seg_color[0], seg_color[1], seg_color[2], line_alpha))
-                else:
-                    colors.append((line_color[0], line_color[1], line_color[2], line_alpha))
+                colors.append((seg_color[0], seg_color[1], seg_color[2], seg_alpha))
 
     if segments:
         lc = LineCollection(
@@ -693,7 +684,7 @@ def make_mlp_scale_stop_time_figure(
     ax.scatter(scales, stop_times, color=line_color, s=point_size, zorder=3)
     ax.set_xlabel(r"$|\omega_j|$")
     ax.set_ylabel("Final time")
-    ax.yaxis.set_major_locator(MaxNLocator(nbins=12))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
     ax.set_ylim(bottom=0.0)
     ax.grid(True, linewidth=0.4, alpha=0.35)
     return fig
@@ -705,7 +696,7 @@ def make_mlp_scale_stop_time_comparison_figure(
     sa_scales: np.ndarray,
     sa_stop_times: np.ndarray,
     point_size: float = 3.0,
-    line_width: float = 1.2,
+    line_width: float = 1.5,
 ) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(6.0, 4.0), constrained_layout=True)
     ax.plot(usa_scales, usa_stop_times, color=MLP_COLOR, linewidth=line_width)
@@ -713,8 +704,8 @@ def make_mlp_scale_stop_time_comparison_figure(
     ax.scatter(usa_scales, usa_stop_times, color=MLP_COLOR, s=point_size, zorder=3)
     ax.scatter(sa_scales, sa_stop_times, color=SA_COLOR, s=point_size, zorder=3)
     ax.set_xlabel(r"$|\omega_j|$")
-    ax.set_ylabel("Final time (s)")
-    ax.yaxis.set_major_locator(MaxNLocator(nbins=12))
+    ax.set_ylabel("Convergence time (s)")
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
     ax.set_ylim(bottom=0.0)
     ax.grid(True, linewidth=0.4, alpha=0.35)
     return fig
@@ -799,33 +790,6 @@ def plot_histogram_1d(
     ax.set_xticks([0.0, np.pi, TWO_PI], ["0", r"$\pi$", r"$2\pi$"])
     ax.set_xlabel(r"$\theta$")
     ax.set_ylabel(r"$\mathrm{count}$")
-
-
-def make_convergence_figure(
-    betas: List[float],
-    times_list: List[np.ndarray],
-    histories: List[np.ndarray],
-    k_max_list: List[int],
-    k_limit: int,
-    color: str,
-    time_scale: str = "linear",
-) -> plt.Figure:
-    n_rows = len(betas)
-    fig, axes = plt.subplots(
-        nrows=n_rows,
-        ncols=3,
-        figsize=(12.5, 4.0 * n_rows),
-        constrained_layout=True,
-    )
-    if n_rows == 1:
-        axes = np.array([axes])
-
-    for row, (beta, times, theta_hist, k_max) in enumerate(zip(betas, times_list, histories, k_max_list)):
-        plot_gamma(axes[row, 0], beta, k_limit, k_max)
-        plot_trajectories(axes[row, 1], times, theta_hist, color=color, time_scale=time_scale)
-        plot_histogram_1d(axes[row, 2], theta_hist[-1], color=color)
-
-    return fig
 
 
 def _primitive_relu(t: np.ndarray) -> np.ndarray:
@@ -1271,7 +1235,7 @@ def make_heaviest_mass_figure(
     mlp_activation: Optional[str] = None,
     null_color: str = NULL_COLOR,
     mlp_color: str = MLP_COLOR,
-    theory_color: str = "#9467bd",
+    theory_color: str = "#bcbd22",
     smallest_color: str = MLP_COLOR,
 ) -> plt.Figure:
     """Plot heaviest cluster mass vs sqrt(beta).
@@ -1290,7 +1254,7 @@ def make_heaviest_mass_figure(
         "s-",
         color=mlp_color,
         markersize=3,
-        linewidth=1.2,
+        linewidth=2.0,
         label="heaviest",
     )
     if smallest_mlp is not None:
@@ -1300,7 +1264,7 @@ def make_heaviest_mass_figure(
             "o--",
             color=smallest_color,
             markersize=3,
-            linewidth=1.0,
+            linewidth=1.6,
             label="smallest",
         )
     
@@ -1314,7 +1278,7 @@ def make_heaviest_mass_figure(
             "^--",
             color=theory_color,
             markersize=3,
-            linewidth=1.0,
+            linewidth=1.6,
             label="theory",
         )
     

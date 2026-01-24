@@ -142,19 +142,6 @@ def cluster_max_spread(theta: np.ndarray, threshold: float) -> float:
     return float(max_spread)
 
 
-def mass_count(theta: np.ndarray, threshold: float, mass_threshold: float) -> int:
-    """Count clusters whose mass exceeds the given fraction threshold."""
-    if mass_threshold <= 0.0:
-        return cluster_count(theta, threshold)
-    if mass_threshold >= 1.0:
-        return 1 if theta.size > 0 else 0
-    sizes = _cluster_sizes(theta, threshold)
-    if sizes.size == 0:
-        return 0
-    min_size = mass_threshold * float(theta.size)
-    return int(np.sum(sizes >= min_size))
-
-
 def heaviest_cluster_mass(theta: np.ndarray, threshold: float) -> float:
     """Return the mass (fraction of particles) in the largest cluster on S1."""
     masses = cluster_masses(theta, threshold)

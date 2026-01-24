@@ -211,16 +211,40 @@ def _frame_indices(times: np.ndarray, interval: float) -> tuple[list[int], list[
     return unique_indices, unique_times
 
 
+_SNAPSHOT_FRACTIONS = {
+    "init": 0.0,
+    "q1": 0.25,
+    "middle": 0.5,
+    "q3": 0.75,
+    "final": 1.0,
+}
+_SNAPSHOT_LABELS = ("init", "q1", "middle", "q3", "final")
+
+
+def _frame_label_positions(num_frames: int) -> dict[int, str]:
+    if num_frames <= 0:
+        return {}
+    last = num_frames - 1
+    labels: dict[int, str] = {}
+    for label in ("init", "middle", "final"):
+        pos = int(round(_SNAPSHOT_FRACTIONS[label] * last))
+        if pos not in labels:
+            labels[pos] = label
+    for label in ("q1", "q3"):
+        pos = int(round(_SNAPSHOT_FRACTIONS[label] * last))
+        if pos not in labels:
+            labels[pos] = label
+    return labels
+
+
 def _snapshot_index(length: int, label: str) -> int:
     if length <= 0:
         return 0
-    if label == "init":
-        return 0
-    if label == "middle":
-        return length // 2
-    if label == "final":
-        return length - 1
-    raise ValueError(f"Unknown snapshot label: {label}")
+    frac = _SNAPSHOT_FRACTIONS.get(label)
+    if frac is None:
+        raise ValueError(f"Unknown snapshot label: {label}")
+    idx = int(round(frac * (length - 1)))
+    return int(np.clip(idx, 0, length - 1))
 
 
 def _histogram_density(theta: np.ndarray, edges: np.ndarray) -> list[float]:
@@ -315,24 +339,8 @@ def _save_frames_and_gif(
     frames_dir = run_dir / f"frames_{label_slug}"
     frames_dir.mkdir(parents=True, exist_ok=True)
 
-    first_idx = 0
-    last_idx = len(frame_indices) - 1
-    mid_idx = len(frame_indices) // 2
-    frame_positions = [first_idx, mid_idx, last_idx]
-    frame_positions = [p for p in frame_positions if 0 <= p < len(frame_indices)]
-    seen = []
-    for p in frame_positions:
-        if p not in seen:
-            seen.append(p)
-    frame_positions = seen
-    frame_labels = {}
-    for pos in frame_positions:
-        if pos == first_idx:
-            frame_labels[pos] = "first"
-        elif pos == last_idx:
-            frame_labels[pos] = "last"
-        else:
-            frame_labels[pos] = "middle"
+    frame_labels = _frame_label_positions(len(frame_indices))
+    frame_positions = sorted(frame_labels)
 
     if skip_gif:
         frame_iter = frame_positions
@@ -1285,7 +1293,7 @@ def run_experiment(config: RunConfig) -> None:
                     save_figure(fig, traj_mlp_stem.with_name(f"{traj_mlp_stem.name}_log"), formats=("pdf",))
                     plt.close(fig)
                     if theta_hist.shape[0] > 0 and null_histories[j].shape[0] > 0:
-                        for label in ("init", "middle", "final"):
+                        for label in _SNAPSHOT_LABELS:
                             mlp_idx = _snapshot_index(theta_hist.shape[0], label)
                             null_idx = _snapshot_index(null_histories[j].shape[0], label)
                             hist_stem = hist_dir / f"histogram_{label}{mlp_suffix}"
