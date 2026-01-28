@@ -125,8 +125,11 @@ def attention_drift_particles(
     beta: float,
     mode: AttentionMode,
     self_attention: bool = False,
+    ascending: bool | None = None,
 ) -> NDArray[np.float64]:
     """Compute the self-attention drift on S1 (USA/SA model in angle form)."""
+    # `ascending` is accepted for compatibility with older call sites.
+    _ = ascending
     effective_self_attention = self_attention or mode == "normalized"
     return _attention_drift(
         theta,
@@ -142,8 +145,11 @@ def attention_drift_at(
     theta_particles: NDArray[np.float64],
     beta: float,
     mode: AttentionMode,
+    ascending: bool | None = None,
 ) -> NDArray[np.float64]:
     """Evaluate attention drift at arbitrary angles against a particle set."""
+    # `ascending` is accepted for compatibility with older call sites.
+    _ = ascending
     return _attention_drift(
         theta_eval,
         theta_particles,

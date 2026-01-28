@@ -141,8 +141,6 @@ def plot_trajectories(
     times: np.ndarray,
     theta_hist: np.ndarray,
     color: str,
-    angle_bins: int = 360,
-    time_bins: int = 200,
     max_particles: int = 250,
     time_stride: int = 1,
     time_scale: str = "linear",
@@ -650,9 +648,20 @@ def make_gamma_figure(beta: float, k_limit: int, k_max: int) -> plt.Figure:
     return fig
 
 
-def save_figure(fig, output_stem: Path, formats: tuple[str, ...] = ("pdf",)) -> None:
+def save_figure(
+    fig,
+    output_stem: Path,
+    formats: tuple[str, ...] = ("pdf",),
+    dpi_by_format: Optional[dict[str, int]] = None,
+    dpi: Optional[int] = None,
+) -> None:
     global _TEX_FALLBACK_APPLIED
     for fmt in formats:
+        target_dpi = PLOT_DPI
+        if dpi is not None:
+            target_dpi = int(dpi)
+        if dpi_by_format and fmt in dpi_by_format:
+            target_dpi = int(dpi_by_format[fmt])
         with warnings.catch_warnings():
             warnings.filterwarnings(
                 "ignore",
@@ -660,7 +669,7 @@ def save_figure(fig, output_stem: Path, formats: tuple[str, ...] = ("pdf",)) -> 
                 category=UserWarning,
             )
             try:
-                fig.savefig(output_stem.with_suffix(f".{fmt}"), dpi=PLOT_DPI)
+                fig.savefig(output_stem.with_suffix(f".{fmt}"), dpi=target_dpi)
             except RuntimeError as exc:
                 message = str(exc).lower()
                 tex_error = "latex was not able to process" in message or "type1cm.sty" in message
@@ -669,7 +678,7 @@ def save_figure(fig, output_stem: Path, formats: tuple[str, ...] = ("pdf",)) -> 
                 _TEX_FALLBACK_APPLIED = True
                 mpl.rcParams.update({"text.usetex": False})
                 print("Warning: LaTeX unavailable; falling back to mathtext for plots.")
-                fig.savefig(output_stem.with_suffix(f".{fmt}"), dpi=PLOT_DPI)
+                fig.savefig(output_stem.with_suffix(f".{fmt}"), dpi=target_dpi)
 
 
 def make_mlp_scale_stop_time_figure(
@@ -1235,7 +1244,7 @@ def make_heaviest_mass_figure(
     mlp_activation: Optional[str] = None,
     null_color: str = NULL_COLOR,
     mlp_color: str = MLP_COLOR,
-    theory_color: str = "#bcbd22",
+    theory_color: str = "#d62728",
     smallest_color: str = MLP_COLOR,
 ) -> plt.Figure:
     """Plot heaviest cluster mass vs sqrt(beta).
@@ -1253,9 +1262,12 @@ def make_heaviest_mass_figure(
         heaviest_mlp,
         "s-",
         color=mlp_color,
-        markersize=3,
+        markersize=6,
+        markeredgecolor="black",
+        markeredgewidth=0.4,
         linewidth=2.0,
         label="heaviest",
+        zorder=3,
     )
     if smallest_mlp is not None:
         ax.plot(
@@ -1263,9 +1275,12 @@ def make_heaviest_mass_figure(
             smallest_mlp,
             "o--",
             color=smallest_color,
-            markersize=3,
+            markersize=5,
+            markeredgecolor="black",
+            markeredgewidth=0.4,
             linewidth=1.6,
             label="smallest",
+            zorder=2,
         )
     
     # Plot theoretical bound if MLP parameters provided
@@ -1275,19 +1290,24 @@ def make_heaviest_mass_figure(
         ax.plot(
             sqrt_betas,
             theory_values,
-            "^--",
+            linestyle="--",
+            marker="D",
             color=theory_color,
-            markersize=3,
+            markersize=6,
+            markeredgecolor="black",
+            markeredgewidth=0.4,
             linewidth=1.6,
             label="theory",
+            zorder=4,
         )
     
     # Plot horizontal line at constant 16/(16 + 3*e^(11/8))
     constant_threshold = 16.0 / (16.0 + 3.0 * np.exp(11.0 / 8.0))
-    ax.axhline(y=constant_threshold, color="black", linestyle="--", linewidth=1.0)
+    ax.axhline(y=constant_threshold, color="black", linestyle="--", linewidth=0.8, zorder=1)
     
-    ax.set_xlabel(r"$\sqrt{\beta}$")
-    ax.set_ylabel(r"mass")
+    # Override the global large label size for this compact plot.
+    ax.set_xlabel(r"$\sqrt{\beta}$", fontsize=9)
+    ax.set_ylabel("")
     
     # Set y-axis limits based on data (don't start at 0)
     y_values = [np.min(heaviest_mlp), constant_threshold]
@@ -1312,7 +1332,7 @@ def make_all_masses_figure(
     mlp_omega: Optional[np.ndarray] = None,
     mlp_activation: Optional[str] = None,
     mlp_color: str = MLP_COLOR,
-    theory_color: str = "#bcbd22",
+    theory_color: str = "#d62728",
     point_alpha: float = 1.0,
 ) -> plt.Figure:
     """Plot all cluster masses vs sqrt(beta)."""
@@ -1340,7 +1360,7 @@ def make_all_masses_figure(
             if np.any(mask):
                 line_width = 1.8 if j == 0 else 0.8
                 marker = "o" if j == 0 else "^"
-                marker_size = 3 if j == 0 else 2
+                marker_size = 6 if j == 0 else 5
                 ax.plot(
                     sqrt_betas[mask],
                     y_vals[mask],
@@ -1348,20 +1368,30 @@ def make_all_masses_figure(
                     linestyle="-",
                     color=mlp_color,
                     markersize=marker_size,
+                    markeredgecolor="black",
+                    markeredgewidth=0.4,
                     linewidth=line_width,
                     alpha=point_alpha,
+                    zorder=2,
                 )
 
     if mlp_a is not None and mlp_omega is not None and mlp_activation is not None:
         c_theta = compute_c_theta(mlp_a, mlp_omega, mlp_activation)
         theory_values = np.array([theoretical_heaviest_mass_bound(b, c_theta) for b in betas])
-        ax.plot(sqrt_betas, theory_values, "^--", color=theory_color, markersize=3, linewidth=1.8)
+        ax.plot(
+            sqrt_betas,
+            theory_values,
+            linestyle="--",
+            color=theory_color,
+            linewidth=1.8,
+            zorder=4,
+        )
 
     constant_threshold = 16.0 / (16.0 + 3.0 * np.exp(11.0 / 8.0))
-    ax.axhline(y=constant_threshold, color="black", linestyle="--", linewidth=1.2)
+    ax.axhline(y=constant_threshold, color="black", linestyle="--", linewidth=0.8, zorder=1)
 
-    ax.set_xlabel(r"$\sqrt{\beta}$")
-    ax.set_ylabel(r"mass")
+    ax.set_xlabel(r"$\sqrt{\beta}$", fontsize=9)
+    ax.set_ylabel("")
 
     y_values = [constant_threshold]
     for masses_arr in masses_by_beta:

@@ -159,6 +159,17 @@ def load_config(path: Path) -> RunConfig:
     total_time = _parse_total_time(merged["total_time"])
     if not betas:
         raise ValueError("At least one beta value is required.")
+    dimension = merged.get("dimension", 2)
+    if isinstance(dimension, list):
+        dims = []
+        for value in dimension:
+            try:
+                dims.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        if len(dims) != 1:
+            raise ValueError("This simulator is for S1 (dimension=2).")
+        merged["dimension"] = dims[0]
     if merged["dimension"] != 2:
         raise ValueError("This simulator is for S1 (dimension=2).")
     if merged["n_particles"] <= 0:
