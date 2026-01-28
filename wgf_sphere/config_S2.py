@@ -24,6 +24,7 @@ class RunConfig:
     num_mlp_inits: int
     num_point_inits: int
     mlp_units: int
+    mlp_units_from_dimension: bool
     activation: Activation
     mlp_scale: float
     mlp_scales: List[float]
@@ -36,6 +37,7 @@ class RunConfig:
     mlp_params_hash: Optional[str]
     results_dir: Path
     dimension: int
+    dimensions: List[int]
     plot_interval: float
     cluster_scale: float
     mass_threshold: float
@@ -135,6 +137,22 @@ def _parse_mlp_scales(value: Any) -> List[float]:
     return scales
 
 
+def _parse_dimensions(value: Any) -> List[int]:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        dims = [int(v) for v in value]
+    else:
+        dims = [int(value)]
+    if not dims:
+        raise ValueError("dimension must be an integer or a non-empty list.")
+    ordered: List[int] = []
+    seen = set()
+    for dim in dims:
+        if dim not in seen:
+            ordered.append(dim)
+            seen.add(dim)
+    return ordered
+
+
 def _parse_total_time(value: Any) -> float:
     if isinstance(value, str):
         lowered = value.strip().lower()
@@ -165,8 +183,10 @@ def load_config(path: Path) -> RunConfig:
     total_time = _parse_total_time(merged["total_time"])
     if not betas:
         raise ValueError("At least one beta value is required.")
-    if merged["dimension"] != 3:
-        raise ValueError("This simulator is for S2 (dimension=3).")
+    dimensions = _parse_dimensions(merged["dimension"])
+    if any(dim < 2 for dim in dimensions):
+        raise ValueError("dimension must be >= 2.")
+    merged["dimension"] = int(dimensions[0])
     if merged["n_particles"] <= 0:
         raise ValueError("n_particles must be positive.")
     if merged["dt"] <= 0.0:
@@ -229,6 +249,14 @@ def load_config(path: Path) -> RunConfig:
         raise ValueError("gif_histogram must be a boolean.")
     merged["gif_sphere"] = gif_sphere
     merged["gif_histogram"] = gif_histogram
+    if len(dimensions) == 1 and merged["dimension"] != 3:
+        warnings.warn(
+            "dimension != 3: disabling sphere plots/gifs/trajectories; stats-only run.",
+            RuntimeWarning,
+        )
+        merged["gif_sphere"] = False
+        merged["gif_histogram"] = False
+        merged["pdf_trajectory"] = False
     sphere_html_view = str(merged.get("sphere_html_view", "mlp")).strip().lower()
     if sphere_html_view not in {"mlp", "null"}:
         raise ValueError("sphere_html_view must be 'mlp' or 'null'.")
@@ -251,6 +279,8 @@ def load_config(path: Path) -> RunConfig:
     mlp_params = None
     mlp_params_hash = None
     if mlp_params_path is not None:
+        if len(dimensions) > 1:
+            raise ValueError("mlp_params_path cannot be used with multiple dimensions.")
         mlp_params, mlp_params_hash = load_mlp_params_file(
             mlp_params_path,
             merged["dimension"],
@@ -272,8 +302,16 @@ def load_config(path: Path) -> RunConfig:
             raise ValueError(
                 "mlp_params_path provides a single MLP; set num_mlp_inits=1 or provide a list."
             )
+        mlp_units_from_dimension = False
     else:
-        mlp_units = merged["mlp_units"] if merged["mlp_units"] is not None else merged["dimension"]
+        if merged["mlp_units"] is None:
+            mlp_units = merged["dimension"]
+            mlp_units_from_dimension = True
+        else:
+            mlp_units = int(merged["mlp_units"])
+            mlp_units_from_dimension = False
+    if mlp_params is not None:
+        mlp_units_from_dimension = False
     mlp_scales = _parse_mlp_scales(merged["mlp_scale"])
     if any(scale < 0.0 for scale in mlp_scales):
         raise ValueError("mlp_scale entries must be non-negative.")
@@ -320,6 +358,7 @@ def load_config(path: Path) -> RunConfig:
         num_mlp_inits=merged["num_mlp_inits"],
         num_point_inits=merged["num_point_inits"],
         mlp_units=mlp_units,
+        mlp_units_from_dimension=mlp_units_from_dimension,
         activation=activation,
         mlp_scale=merged["mlp_scale"],
         mlp_scales=mlp_scales,
@@ -332,6 +371,7 @@ def load_config(path: Path) -> RunConfig:
         mlp_params_hash=mlp_params_hash,
         results_dir=Path(merged["results_dir"]),
         dimension=merged["dimension"],
+        dimensions=dimensions,
         plot_interval=merged["plot_interval"],
         cluster_scale=merged["cluster_scale"],
         mass_threshold=merged["mass_threshold"],

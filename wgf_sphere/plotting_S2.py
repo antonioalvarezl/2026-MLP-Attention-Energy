@@ -1689,7 +1689,7 @@ def make_heaviest_mass_figure(
     mlp_activation: Optional[str] = None,
     null_color: str = "#ED5E93",
     mlp_color: str = "#0072B2",
-    theory_color: str = "#D55E00",
+    theory_color: str = "#d62728",
     smallest_color: str = "#E69F00",
 ) -> plt.Figure:
     """Plot heaviest cluster mass vs sqrt(beta).
@@ -1700,27 +1700,54 @@ def make_heaviest_mass_figure(
     fig, ax = plt.subplots(figsize=(5, 3.5))
     
     sqrt_betas = np.sqrt(betas)
+    line_alpha = 0.6
     
     # Plot MLP curve only
-    ax.plot(
-        sqrt_betas,
-        heaviest_mlp,
-        "s-",
-        color=mlp_color,
-        markersize=3,
-        linewidth=1.2,
-        label="heaviest",
-    )
-    if smallest_mlp is not None:
+    heaviest_mask = np.isfinite(heaviest_mlp)
+    if np.any(heaviest_mask):
         ax.plot(
-            sqrt_betas,
-            smallest_mlp,
-            "o--",
-            color=smallest_color,
-            markersize=3,
-            linewidth=1.0,
-            label="smallest",
+            sqrt_betas[heaviest_mask],
+            heaviest_mlp[heaviest_mask],
+            color=mlp_color,
+            linewidth=1.2,
+            linestyle="-",
+            label="heaviest",
+            zorder=2,
+            alpha=line_alpha,
         )
+        ax.scatter(
+            sqrt_betas[heaviest_mask],
+            heaviest_mlp[heaviest_mask],
+            marker="s",
+            s=36,
+            facecolors=mlp_color,
+            edgecolors="black",
+            linewidths=0.6,
+            zorder=3,
+        )
+    if smallest_mlp is not None:
+        smallest_mask = np.isfinite(smallest_mlp)
+        if np.any(smallest_mask):
+            ax.plot(
+                sqrt_betas[smallest_mask],
+                smallest_mlp[smallest_mask],
+                linestyle="--",
+                color=smallest_color,
+                linewidth=1.0,
+                label="smallest",
+                zorder=2,
+                alpha=line_alpha,
+            )
+            ax.scatter(
+                sqrt_betas[smallest_mask],
+                smallest_mlp[smallest_mask],
+                marker="D",
+                s=25,
+                facecolors=smallest_color,
+                edgecolors="black",
+                linewidths=0.3,
+                zorder=3,
+            )
     
     # Plot theoretical bound if MLP parameters provided
     if mlp_a is not None and mlp_omega is not None and mlp_activation is not None:
@@ -1729,22 +1756,26 @@ def make_heaviest_mass_figure(
         ax.plot(
             sqrt_betas,
             theory_values,
-            "^--",
+            linestyle="--",
             color=theory_color,
-            markersize=3,
             linewidth=1.0,
             label="theory",
+            zorder=4,
         )
     
     # Plot horizontal line at constant 16/(16 + 3*e^(11/8))
     constant_threshold = 16.0 / (16.0 + 3.0 * np.exp(11.0 / 8.0))
-    ax.axhline(y=constant_threshold, color="black", linestyle="--", linewidth=1.0)
+    ax.axhline(y=constant_threshold, color="black", linestyle="--", linewidth=0.8, zorder=1)
     
     ax.set_xlabel(r"$\sqrt{\beta}$")
-    ax.set_ylabel(r"mass")
+    ax.set_ylabel("")
     
     # Set y-axis limits based on data (don't start at 0)
-    y_values = [np.min(heaviest_mlp), constant_threshold]
+    heaviest_mlp_arr = np.asarray(heaviest_mlp, dtype=float)
+    finite_heaviest = heaviest_mlp_arr[np.isfinite(heaviest_mlp_arr)]
+    y_values = [constant_threshold]
+    if finite_heaviest.size:
+        y_values.append(np.min(finite_heaviest))
     if smallest_mlp is not None and smallest_mlp.size:
         finite_smallest = smallest_mlp[np.isfinite(smallest_mlp)]
         if finite_smallest.size:
@@ -1766,45 +1797,82 @@ def make_all_masses_figure(
     mlp_omega: Optional[np.ndarray] = None,
     mlp_activation: Optional[str] = None,
     mlp_color: str = "#0072B2",
-    theory_color: str = "#D55E00",
-    point_alpha: float = 0.6,
+    theory_color: str = "#d62728",
+    point_alpha: float = 1.0,
+    line_alpha: float = 0.6,
 ) -> "plt.Figure":
     """Plot all cluster masses vs sqrt(beta)."""
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(5, 3.5))
     sqrt_betas = np.sqrt(betas)
-    jitter_width = 0.015
-    for x, masses in zip(sqrt_betas, all_masses):
+    masses_by_beta = []
+    max_count = 0
+    for masses in all_masses:
         masses_arr = np.asarray(masses, dtype=float).ravel()
         masses_arr = masses_arr[np.isfinite(masses_arr)]
-        if masses_arr.size == 0:
-            continue
-        if masses_arr.size == 1:
-            x_vals = np.array([x])
-        else:
-            jitter = np.linspace(-jitter_width, jitter_width, masses_arr.size)
-            x_vals = x + jitter
-        ax.scatter(
-            x_vals,
-            masses_arr,
-            s=10,
-            color=mlp_color,
-            alpha=point_alpha,
-            linewidths=0.0,
-        )
+        if masses_arr.size:
+            masses_arr = np.sort(masses_arr)[::-1]
+        masses_by_beta.append(masses_arr)
+        max_count = max(max_count, masses_arr.size)
+
+    if max_count:
+        mass_matrix = np.full((len(betas), max_count), np.nan, dtype=float)
+        for i, masses_arr in enumerate(masses_by_beta):
+            if masses_arr.size:
+                mass_matrix[i, : masses_arr.size] = masses_arr
+        for j in range(max_count):
+            y_vals = mass_matrix[:, j]
+            mask = np.isfinite(y_vals)
+            if np.any(mask):
+                line_width = 1.6 if j == 0 else 0.8
+                marker = "o" if j == 0 else "D"
+                marker_size = 6 if j == 0 else 4
+                marker_edge = 0.6 if j == 0 else 0.3
+                ax.plot(
+                    sqrt_betas[mask],
+                    y_vals[mask],
+                    linestyle="-",
+                    color=mlp_color,
+                    linewidth=line_width,
+                    alpha=line_alpha,
+                    zorder=1,
+                )
+                ax.scatter(
+                    sqrt_betas[mask],
+                    y_vals[mask],
+                    marker=marker,
+                    s=marker_size**2,
+                    facecolors=mlp_color,
+                    edgecolors="black",
+                    linewidths=marker_edge,
+                    alpha=point_alpha,
+                    zorder=2,
+                )
 
     if mlp_a is not None and mlp_omega is not None and mlp_activation is not None:
         c_theta = compute_c_theta(mlp_a, mlp_omega, mlp_activation)
         theory_values = np.array([theoretical_heaviest_mass_bound(b, c_theta) for b in betas])
-        ax.plot(sqrt_betas, theory_values, "^--", color=theory_color, markersize=3, linewidth=1.0)
+        ax.plot(
+            sqrt_betas,
+            theory_values,
+            linestyle="--",
+            color=theory_color,
+            linewidth=1.6,
+            zorder=4,
+        )
 
     constant_threshold = 16.0 / (16.0 + 3.0 * np.exp(11.0 / 8.0))
-    ax.axhline(y=constant_threshold, color="black", linestyle="--", linewidth=1.0)
+    ax.axhline(y=constant_threshold, color="black", linestyle="--", linewidth=0.8, zorder=1)
 
     ax.set_xlabel(r"$\sqrt{\beta}$")
-    ax.set_ylabel(r"mass")
-    ax.set_ylim(0.0, 1.05)
+    ax.set_ylabel("")
+    y_values = [constant_threshold]
+    for masses_arr in masses_by_beta:
+        if masses_arr.size:
+            y_values.append(np.min(masses_arr))
+    y_min = min(y_values) - 0.05 if y_values else 0.0
+    ax.set_ylim(y_min, 1.05)
     ax.tick_params(axis="both", which="major", labelsize=9)
     ax.tick_params(axis="both", which="minor", labelsize=7)
 

@@ -19,6 +19,8 @@ from wgf_circle.plotting import (
     MLP_COLOR,
     NULL_COLOR,
     SA_COLOR,
+    POTENTIAL_NEG_COLOR,
+    POTENTIAL_POS_COLOR,
     make_cluster_bar_plot,
     make_cluster_bar_plot_with_null,
     save_figure,
@@ -44,7 +46,6 @@ from .plotting_S2 import (
     create_sphere_mesh_cache,
     make_all_masses_figure,
     make_energy_figure,
-    make_energy_overlay_figure,
     make_heaviest_mass_figure,
     make_mlp_potential_surface_figure,
     make_s2_comparison_figure,
@@ -61,6 +62,43 @@ def progress_interval(total_steps: int, target_updates: int = 100) -> int:
     if total_steps <= 0:
         return 1
     return max(1, total_steps // max(1, target_updates))
+
+
+def _resolve_experiment_dir(config: RunConfig, experiment_stamp: str) -> Path:
+    if config.experiment_dir is None:
+        experiment_dir = config.results_dir / f"experiment_{experiment_stamp}"
+        experiment_dir.mkdir(parents=True, exist_ok=False)
+        return experiment_dir
+    experiment_dir = config.experiment_dir
+    if not experiment_dir.is_absolute():
+        if experiment_dir.parent == Path("."):
+            experiment_dir = config.results_dir / experiment_dir
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+    return experiment_dir
+
+
+def _run_multi_dim_experiment(config: RunConfig) -> None:
+    experiment_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_dir = _resolve_experiment_dir(config, experiment_stamp)
+    dimension_dirs: dict[int, Path] = {}
+    for dim in config.dimensions:
+        dim_dir = base_dir / f"d{dim}"
+        dim_dir.mkdir(parents=True, exist_ok=True)
+        dim_config = replace(config, dimension=dim, dimensions=[dim], experiment_dir=dim_dir)
+        if config.mlp_units_from_dimension:
+            dim_config = replace(dim_config, mlp_units=dim)
+        if dim != 3:
+            dim_config = replace(
+                dim_config,
+                gif_sphere=False,
+                gif_histogram=False,
+                pdf_trajectory=False,
+            )
+        run_experiment_s2(dim_config)
+        dimension_dirs[dim] = dim_dir
+
+    output_path = base_dir / "cluster_count_by_dimension"
+    _save_dimension_cluster_count_plot(output_path, dimension_dirs, config.ascending)
 
 
 class ProgressHandle:
@@ -643,6 +681,206 @@ def _load_run_summaries(
     return ordered
 
 
+def _load_latest_summaries_by_beta(experiment_dir: Path) -> dict[float, dict]:
+    latest: dict[float, tuple[float, dict]] = {}
+    if not experiment_dir.exists():
+        return {}
+    for summary_path in experiment_dir.rglob("summary.json"):
+        try:
+            data = json.loads(summary_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        beta = data.get("beta")
+        if beta is None:
+            continue
+        try:
+            beta_value = float(beta)
+        except (TypeError, ValueError):
+            continue
+        mtime = summary_path.stat().st_mtime
+        current = latest.get(beta_value)
+        if current is None or mtime > current[0]:
+            latest[beta_value] = (mtime, data)
+    return {beta: data for beta, (mtime, data) in latest.items()}
+
+
+def _save_dimension_cluster_count_plot(
+    output_path: Path,
+    dimension_dirs: dict[int, Path],
+    ascending: bool,
+) -> None:
+    series = {}
+    for dim, dim_dir in dimension_dirs.items():
+        summaries = _load_latest_summaries_by_beta(dim_dir)
+        if not summaries:
+            continue
+        betas = np.array(sorted(summaries.keys()), dtype=float)
+        sqrt_betas = np.sqrt(betas)
+        mlp_means = []
+        null_means = []
+        for beta in betas:
+            entry = summaries[beta]
+            mlp_vals = np.asarray(entry.get("mlp_counts", []), dtype=float)
+            null_vals = np.asarray(entry.get("null_counts", []), dtype=float)
+            mlp_means.append(float(np.mean(mlp_vals)) if mlp_vals.size else np.nan)
+            null_means.append(float(np.mean(null_vals)) if null_vals.size else np.nan)
+        series[dim] = (sqrt_betas, np.asarray(mlp_means), np.asarray(null_means))
+
+    if not series:
+        return
+
+    color_pool = [
+        "#1f77b4",
+        "#ff7f0e",
+        "#2ca02c",
+        "#d62728",
+        "#9467bd",
+        "#8c564b",
+        "#e377c2",
+        "#7f7f7f",
+        "#bcbd22",
+        "#17becf",
+    ]
+    dims_sorted = sorted(series.keys())
+    if len(dims_sorted) > len(color_pool):
+        raise ValueError(
+            f"Not enough unique colors for dimensions: {len(dims_sorted)} > {len(color_pool)}"
+        )
+
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    def _make_plot(log_y: bool, suffix: str, include_null: bool) -> None:
+        def _mask_values(values: np.ndarray) -> np.ndarray:
+            mask = np.isfinite(values)
+            if log_y:
+                mask &= values > 0.0
+            return mask
+
+        def _build_layers(value_index: int) -> dict[int, tuple[int, int]]:
+            groups: list[dict[str, object]] = []
+            for dim in dims_sorted:
+                x_vals, mlp_vals, null_vals = series[dim]
+                y_vals = mlp_vals if value_index == 0 else null_vals
+                mask = _mask_values(y_vals)
+                if not np.any(mask):
+                    continue
+                x = x_vals[mask]
+                y = y_vals[mask]
+                matched = False
+                for group in groups:
+                    gx = group["x"]
+                    gy = group["y"]
+                    if (
+                        isinstance(gx, np.ndarray)
+                        and isinstance(gy, np.ndarray)
+                        and x.shape == gx.shape
+                        and np.allclose(x, gx, rtol=0.0, atol=1e-12)
+                        and np.allclose(y, gy, rtol=0.0, atol=1e-12)
+                    ):
+                        group["dims"].append(dim)
+                        matched = True
+                        break
+                if not matched:
+                    groups.append({"x": x, "y": y, "dims": [dim]})
+            layers: dict[int, tuple[int, int]] = {}
+            for group in groups:
+                dims = group["dims"]
+                size = len(dims)
+                for idx, dim in enumerate(dims):
+                    layers[dim] = (idx, size)
+            return layers
+
+        mlp_layers = _build_layers(0)
+        null_layers = _build_layers(1) if include_null and ascending else {}
+
+        fig, ax = plt.subplots(figsize=(6.5, 3.4), constrained_layout=True)
+        handles = []
+        labels = []
+        for idx, dim in enumerate(dims_sorted):
+            color = color_pool[idx % len(color_pool)]
+            x_vals, mlp_vals, null_vals = series[dim]
+            mask = _mask_values(mlp_vals)
+            if np.any(mask):
+                layer_idx, layer_size = mlp_layers.get(dim, (0, 1))
+                line_width = 1.6 + 0.5 * (layer_size - 1 - layer_idx)
+                marker_size = 16 + 4 * (layer_size - 1 - layer_idx)
+                ax.plot(
+                    x_vals[mask],
+                    mlp_vals[mask],
+                    color=color,
+                    linewidth=line_width,
+                    linestyle="-",
+                )
+                ax.scatter(
+                    x_vals[mask],
+                    mlp_vals[mask],
+                    facecolors=color,
+                    edgecolors=color,
+                    s=marker_size,
+                    zorder=3,
+                )
+            if include_null and ascending:
+                null_mask = _mask_values(null_vals)
+                if np.any(null_mask):
+                    layer_idx, layer_size = null_layers.get(dim, (0, 1))
+                    line_width = 1.2 + 0.4 * (layer_size - 1 - layer_idx)
+                    marker_size = 14 + 3 * (layer_size - 1 - layer_idx)
+                    ax.plot(
+                        x_vals[null_mask],
+                        null_vals[null_mask],
+                        color=color,
+                        linewidth=line_width,
+                        linestyle="--",
+                    )
+                    ax.scatter(
+                        x_vals[null_mask],
+                        null_vals[null_mask],
+                        facecolors=color,
+                        edgecolors=color,
+                        s=marker_size,
+                        zorder=3,
+                    )
+            handles.append(Line2D([0], [0], color=color, linewidth=2.0))
+            labels.append(f"d={dim}")
+
+        ax.set_xlabel(r"$\sqrt{\beta}$")
+        ax.set_ylabel("cluster count")
+        if log_y:
+            positives = []
+            for _, (_, mlp_vals, null_vals) in series.items():
+                positives.append(mlp_vals[np.isfinite(mlp_vals) & (mlp_vals > 0.0)])
+                if include_null and ascending:
+                    positives.append(null_vals[np.isfinite(null_vals) & (null_vals > 0.0)])
+            if positives:
+                all_pos = np.concatenate(positives)
+                if all_pos.size:
+                    ax.set_ylim(bottom=float(np.min(all_pos)) * 0.8)
+            ax.set_yscale("log")
+            ax.grid(True, axis="y", which="both", linewidth=0.4, alpha=0.3)
+        else:
+            ax.set_ylim(bottom=0.0)
+            ax.grid(True, axis="y", linewidth=0.4, alpha=0.3)
+        ax.legend(
+            handles,
+            labels,
+            frameon=False,
+            fontsize=8,
+            loc="best",
+            handlelength=1.4,
+            labelspacing=0.3,
+            borderaxespad=0.2,
+        )
+
+        save_figure(fig, output_path.with_name(f"{output_path.name}{suffix}"), formats=("pdf",))
+        plt.close(fig)
+
+    _make_plot(log_y=False, suffix="", include_null=True)
+    _make_plot(log_y=True, suffix="_log", include_null=True)
+    _make_plot(log_y=False, suffix="_mlp", include_null=False)
+    _make_plot(log_y=True, suffix="_mlp_log", include_null=False)
+
+
 def _load_scale_summaries(
     experiment_dir: Path,
     expected_params: dict[float, str],
@@ -814,6 +1052,10 @@ def _simulate_until_convergence_s2(
 
 
 def run_experiment_s2(config: RunConfig) -> None:
+    if len(config.dimensions) > 1:
+        _run_multi_dim_experiment(config)
+        return
+
     is_infinite = np.isinf(config.total_time)
     if is_infinite:
         num_steps = int(config.max_steps)
@@ -863,15 +1105,7 @@ def run_experiment_s2(config: RunConfig) -> None:
     effective_total_time = None if is_infinite else num_steps * config.dt
     progress_every = progress_interval(num_steps)
     experiment_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    if config.experiment_dir is None:
-        experiment_dir = config.results_dir / f"experiment_{experiment_stamp}"
-        experiment_dir.mkdir(parents=True, exist_ok=False)
-    else:
-        experiment_dir = config.experiment_dir
-        if not experiment_dir.is_absolute():
-            if experiment_dir.parent == Path("."):
-                experiment_dir = config.results_dir / experiment_dir
-        experiment_dir.mkdir(parents=True, exist_ok=True)
+    experiment_dir = _resolve_experiment_dir(config, experiment_stamp)
 
     expected_params: dict[float, str] = {}
     mlp_scales = config.mlp_scales
@@ -934,11 +1168,28 @@ def run_experiment_s2(config: RunConfig) -> None:
             )
 
         threshold = cluster_threshold(beta, config.cluster_scale)
+        # Cap the clustering threshold to avoid beta→0 collapsing everything into one cluster.
+        # Dimension-dependent cap: pi/(2d).
+        threshold = min(threshold, np.pi / (2.0 * config.dimension))
         match_null_to_mlp = (
             is_infinite
             and config.gradient_mlp
             and not config.ascending
             and config.dimension == 3
+        )
+        enable_plots = config.dimension == 3
+        # For descending runs in higher dimensions, cap MLP-null steps.
+        null_step_limit = 1000 if (not config.ascending and config.dimension > 3) else None
+        null_num_steps = num_steps
+        null_max_steps = config.max_steps
+        if null_step_limit is not None:
+            null_num_steps = min(null_num_steps, null_step_limit)
+            null_max_steps = min(null_max_steps, null_step_limit)
+        null_progress_every = progress_interval(null_num_steps)
+        sim_config_null = (
+            sim_config
+            if null_num_steps == num_steps
+            else replace(sim_config, num_steps=null_num_steps)
         )
 
         # Only keep first history for plots; count clusters immediately for others
@@ -952,14 +1203,16 @@ def run_experiment_s2(config: RunConfig) -> None:
         example_null_final = None
         example_null_times = None
         example_null_hist = None
-        need_full_history = config.gif_sphere or config.gif_histogram or config.pdf_trajectory
+        need_full_history = enable_plots and (
+            config.gif_sphere or config.gif_histogram or config.pdf_trajectory
+        )
 
         if not match_null_to_mlp:
             for idx, points0 in enumerate(points0_list):
                 # Only save full history for first run if needed for GIFs
                 save_this_history = (idx == 0) and need_full_history
                 label = f"beta={beta} MLP_null init {idx + 1}/{config.num_point_inits}"
-                bar = ProgressHandle(num_steps, label=label)
+                bar = ProgressHandle(null_num_steps, label=label)
                 if is_infinite:
                     times, points_hist, step_count, stop_reason = _simulate_until_convergence_s2(
                         points0,
@@ -967,11 +1220,11 @@ def run_experiment_s2(config: RunConfig) -> None:
                         None,
                         threshold,
                         config.convergence_window,
-                        config.max_steps,
+                        null_max_steps,
                         config.convergence_drift_tol,
                         config.convergence_spread_factor,
                         progress=bar.update_to,
-                        progress_every=progress_every,
+                        progress_every=null_progress_every,
                         save_history=save_this_history,
                     )
                     if stop_reason != "convergence":
@@ -979,13 +1232,13 @@ def run_experiment_s2(config: RunConfig) -> None:
                 else:
                     times, points_hist = simulate_positions(
                         points0,
-                        sim_config,
+                        sim_config_null,
                         None,
                         progress=bar.update_to,
-                        progress_every=progress_every,
+                        progress_every=null_progress_every,
                         save_history=save_this_history,
                     )
-                    step_count = num_steps
+                    step_count = null_num_steps
                     stop_reason = "fixed_time"
                 bar.close()
                 null_steps.append(step_count)
@@ -1364,7 +1617,7 @@ def run_experiment_s2(config: RunConfig) -> None:
                 mlp_activation=mlp_activation_str,
             )
 
-            if example_mlp_final is not None:
+            if enable_plots and example_mlp_final is not None:
                 potential_params = None
                 if config.gradient_mlp and example_mlp_params is not None:
                     potential_params = (
@@ -1738,6 +1991,38 @@ def run_experiment_s2(config: RunConfig) -> None:
             entry = summaries[idx]
             h_null = entry.get("heaviest_mass_null")
             h_mlp = entry.get("heaviest_mass_mlp")
+            if h_null is None:
+                positions = entry.get("positions_final_null")
+                params_json = entry.get("params_json")
+                if positions is not None and params_json:
+                    try:
+                        params = json.loads(params_json)
+                        cluster_scale = params.get("cluster_scale")
+                        beta_val = float(entry["beta"])
+                        if cluster_scale is not None and beta_val > 0.0:
+                            threshold = cluster_threshold(beta_val, float(cluster_scale))
+                            h_null = heaviest_cluster_mass_s2(
+                                np.asarray(positions, dtype=np.float64),
+                                threshold,
+                            )
+                    except Exception:
+                        h_null = None
+            if h_mlp is None:
+                positions = entry.get("positions_final_mlp")
+                params_json = entry.get("params_json")
+                if positions is not None and params_json:
+                    try:
+                        params = json.loads(params_json)
+                        cluster_scale = params.get("cluster_scale")
+                        beta_val = float(entry["beta"])
+                        if cluster_scale is not None and beta_val > 0.0:
+                            threshold = cluster_threshold(beta_val, float(cluster_scale))
+                            h_mlp = heaviest_cluster_mass_s2(
+                                np.asarray(positions, dtype=np.float64),
+                                threshold,
+                            )
+                    except Exception:
+                        h_mlp = None
             heaviest_null_list.append(h_null if h_null is not None else np.nan)
             heaviest_mlp_list.append(h_mlp if h_mlp is not None else np.nan)
             masses_list = entry.get("mlp_cluster_masses")
@@ -1786,7 +2071,12 @@ def run_experiment_s2(config: RunConfig) -> None:
             null_color=NULL_COLOR,
             mlp_color=MLP_COLOR,
         )
-        save_figure(fig, stats_dir / "heaviest_mass", formats=("pdf",))
+        save_figure(
+            fig,
+            stats_dir / "heaviest_mass",
+            formats=("pdf", "png"),
+            dpi_by_format={"pdf": 2400},
+        )
         plt.close(fig)
 
         # ---------- All cluster masses plot ----------
@@ -1827,54 +2117,14 @@ def run_experiment_s2(config: RunConfig) -> None:
             mlp_activation=mlp_activation,
             mlp_color=MLP_COLOR,
         )
-        save_figure(fig, stats_dir / "all_masses", formats=("pdf",))
+        save_figure(
+            fig,
+            stats_dir / "all_masses",
+            formats=("pdf", "png"),
+            dpi_by_format={"pdf": 2400},
+        )
         plt.close(fig)
         
-        # ---------- Energy overlay plot ----------
-        # Collect energy data from all summaries
-        energy_data = []
-        for idx in order:
-            entry = summaries[idx]
-            e_times_null = entry.get("energy_times_null")
-            e_vals_null = entry.get("energy_values_null")
-            e_times_mlp = entry.get("energy_times_mlp")
-            e_vals_mlp = entry.get("energy_values_mlp")
-            
-            if e_times_null is not None and e_vals_null is not None:
-                energy_data.append({
-                    "beta": entry["beta"],
-                    "times_null": e_times_null,
-                    "energy_null": e_vals_null,
-                    "times_mlp": e_times_mlp if e_times_mlp else [],
-                    "energy_mlp": e_vals_mlp if e_vals_mlp else [],
-                })
-        
-        if energy_data:
-            # Generate colors for each beta - use a colormap
-            n_betas = len(energy_data)
-            cmap = plt.cm.viridis
-            colors = [cmap(i / max(1, n_betas - 1)) for i in range(n_betas)]
-            colors_hex = ['#%02x%02x%02x' % (int(c[0]*255), int(c[1]*255), int(c[2]*255)) for c in colors]
-            
-            # Linear scale - without legend
-            fig = make_energy_overlay_figure(energy_data, colors_hex, time_scale="linear", show_legend=False)
-            save_figure(fig, stats_dir / "energy_overlay", formats=("pdf",))
-            plt.close(fig)
-            
-            # Linear scale - with legend
-            fig = make_energy_overlay_figure(energy_data, colors_hex, time_scale="linear", show_legend=True)
-            save_figure(fig, stats_dir / "energy_overlay_legend", formats=("pdf",))
-            plt.close(fig)
-            
-            # Log scale - without legend
-            fig = make_energy_overlay_figure(energy_data, colors_hex, time_scale="log", show_legend=False)
-            save_figure(fig, stats_dir / "energy_overlay_log", formats=("pdf",))
-            plt.close(fig)
-            
-            # Log scale - with legend
-            fig = make_energy_overlay_figure(energy_data, colors_hex, time_scale="log", show_legend=True)
-            save_figure(fig, stats_dir / "energy_overlay_log_legend", formats=("pdf",))
-            plt.close(fig)
 
 
 def main(config_path: Optional[Path] = None) -> None:
