@@ -82,13 +82,19 @@ Seeds are derived deterministically when multiple initializations are used.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `k_max` | int ≥ 0 | 20 | Maximum k for gamma spectrum (S¹) and convergence plots |
-| `cluster_scale` | float > 0 | 1.0 | Clustering threshold = `cluster_scale / sqrt(beta)` (S¹ cap at `π/20`) |
-| `mass_threshold` | float ∈ [0,1] | 0.0 | Minimum mass fraction for cluster counting |
+| `cluster_scale` | float > 0 | 1.0 | Clustering threshold = `cluster_scale / sqrt(beta)` (capped at `π/(2d)`) |
+| `mass_threshold` | float ∈ [0,1] | 0.0 | Minimum mass fraction for `mass_count` stats (cluster size ≥ `mass_threshold * n_particles`) |
 | `convergence_window` | int > 0 | 5 | Consecutive snapshots with same cluster count to declare convergence |
 | `convergence_drift_tol` | float ≥ 0 | 1e-3 | Max drift magnitude for convergence (0 disables) |
 | `convergence_spread_factor` | float ≥ 0 | 1.0 | Max spread ≤ factor × threshold for convergence (0 disables) |
 
 When `total_time="inf"`, simulation stops at convergence or `max_steps`.
+
+Convergence is checked every `save_every` steps using three conditions:
+(1) cluster count stable for `convergence_window`, (2) max within-cluster spread
+≤ `convergence_spread_factor * threshold`, and (3) max drift magnitude
+≤ `convergence_drift_tol` (if > 0). This is the same for MLP=0 descent; there
+is no special "sanity cap" in the current runner.
 
 ---
 
@@ -100,7 +106,10 @@ When `total_time="inf"`, simulation stops at convergence or `max_steps`.
 | `experiment_dir` | string or null | null | Specific experiment folder. If null, creates timestamped folder. Set to resume interrupted runs |
 | `plot_interval` | float > 0 | 0.1 | Time interval between GIF frames |
 | `output_frame_limit` | int > 0 | 400 | Maximum frames for GIFs. Exceeded → skip GIF generation |
-| `mlp0_output_frame_limit` | int or null | null | Frame limit for MLP=0 (S² only; null uses `output_frame_limit`) |
+| `mlp0_output_frame_limit` | int or null | null | Frame cap for MLP=0 GIFs (S² only, used when `gradient_MLP=true`; does not affect convergence) |
+
+On S¹ runs, plots are grouped into subfolders inside each run directory:
+`frames/`, `histograms/`, and `trajectories/`.
 
 ---
 
