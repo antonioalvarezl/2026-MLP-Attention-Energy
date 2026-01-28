@@ -1,11 +1,11 @@
 {
-  "betas": [1],
-  "n_particles": 1000,
+  "betas": [0.01, 0.05, 0.1, 0.5, 1, 3, 5, 7, 10, 15, 25, 35, 50],
+  "n_particles": 500,
   "dt": 0.1,
   "total_time": "inf",
   "max_steps": 200000,
   "save_every": 10,
-  "dimension": 2,
+  "dimension": 3,
   "integrator": "euler",
   "k_max": 20,
   "num_point_inits": 1,
@@ -16,7 +16,7 @@
   "convergence_drift_tol": 0.0001,
   "convergence_spread_factor": 1.0,
 
-  "attention_mode": "normalized",
+  "attention_mode": "unnormalized",
   "self_attention": true,
   "ascending": false,
 
@@ -32,8 +32,8 @@
   "plot_interval": 0.1,
   "output_frame_limit": 10000,
   "mlp0_output_frame_limit": 400,
-  "gif_sphere": true,
-  "gif_histogram": true,
+  "gif_sphere": false,
+  "gif_histogram": false,
   "pdf_trajectory": false,
   "sphere_gif_rotations": 2.0
 }

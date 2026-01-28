@@ -3,8 +3,8 @@
 This repo simulates transformer-style dynamics (self-attention + MLP) on compact
 manifolds, interpreted as Wasserstein gradient flows. Two geometries are supported:
 
-- **S¹ (circle)** 
-- **S² (sphere)** (animations inside the folder wgf_sphere)
+- **S¹ (circle)**: dimension = 2
+- **S² (sphere)**: dimension = 3 (animations in the folder wgf_sphere)
 
 **Unnormalized self-attention + Gradient Ascent (ReLU)**
 
@@ -13,11 +13,11 @@ manifolds, interpreted as Wasserstein gradient flows. Two geometries are support
 **Normalized self-attention + Gradient Ascent (ReLU)**
 ![Demo](examples/SA.gif)
 
-**Unnormalized self-attention + Gradient Descent (ReLU)**
+**Unnormalized self-attention + Gradient Descent (GeLU)**
 
 ![Demo](examples/USAd.gif)
 
-**Normalized self-attention + Gradient Descent (ReLU)**
+**Normalized self-attention + Gradient Descent (GeLU)**
 
 ![Demo](examples/SAd.gif)
 
@@ -25,6 +25,16 @@ manifolds, interpreted as Wasserstein gradient flows. Two geometries are support
 
 Two attention variants are available: unnormalized self-attention (USA) and
 normalized self-attention (SA).
+
+**Multi-dimension sweeps (S² runner):** set `dimension` as a list (e.g. `[2,3,5]`).
+When more than one dimension is provided, the S² runner creates `results/.../d{dim}/`
+subfolders (one per dimension) and an aggregate cluster-count plot across dimensions
+at the experiment root. For dimensions other than 3, plots/GIFs are disabled
+(stats-only runs). For gradient descent, the aggregate plot omits the MLP=0 curves.
+
+**Cluster threshold cap:** the clustering threshold is capped by dimension as
+`min(cluster_scale / sqrt(beta), π / (2d))` to avoid beta→0 collapsing everything
+into a single cluster.
 
 ## Model
 
@@ -107,6 +117,8 @@ See `CONFIG.md` for all configuration options and valid values.
 python3 main.py
 ```
 
+`main.py` routes to the S¹ runner when `dimension=2`. It routes to the S² runner
+when `dimension>=3` or when `dimension` is a list (multi-dimension sweep).
 
 ### Seeds used in our runs
 
@@ -128,23 +140,21 @@ produces its own run folder.
 
 ### S¹ specific outputs
 
-- `gamma_k.pdf` — eigenvalue spectrum
-- `trajs/trajectories_null*.pdf` — null model (MLP=0) trajectories
-- `trajs/trajectories_MLP*.pdf` — MLP trajectories (with potential background when `gradient_MLP=true`)
-- `histograms/histogram_{init,middle,final}*.pdf` — particle distribution over time (final also saved as `histograms/histogram*.pdf`)
+- `trajectories/trajectories_null*.pdf` — null model (MLP=0) trajectories
+- `trajectories/trajectories_MLP*.pdf` — MLP trajectories (with potential background when `gradient_MLP=true`)
+- `histograms/histogram*.pdf` — particle distribution snapshots (MLP; includes final)
+- `histograms/histogram_with_null*.pdf` — particle distribution with null overlay
+- `frames/frame_{first,middle,last}_*{_mlp0}.pdf` — key frame snapshots (MLP frames and MLP=0 frames)
 - `mlp_potential*.pdf` — MLP potential $v(\theta)$ (gradient MLP only)
 - `energy.pdf`, `energy_log.pdf` — energy vs time (null + MLP)
 - `evolution_*.gif` — animated evolution (if `gif_sphere=true`)
+- `field_*.gif` — animated drift field (if `gif_sphere=true`)
 
 ### S² specific outputs
 
 - `sphere/mlp_potential.pdf` — MLP potential surface (gradient MLP only)
-- `sphere/init_{null,mlp}.pdf` — initial particle configuration
-- `sphere/middle_{null,mlp}.pdf` — mid-evolution snapshot
-- `sphere/final_{null,mlp}.pdf` — final configuration
-- `hist/init_{null,mlp}.pdf` — 3D bar histogram at initial time
-- `hist/middle_{null,mlp}.pdf` — 3D bar histogram at middle time
-- `hist/final_{null,mlp}.pdf` — 3D bar histogram at final time
+- `sphere/{init,q1,middle,q3,final}_{null,mlp}.pdf` — sphere snapshots
+- `hist/{init,q1,middle,q3,final}_{null,mlp}.pdf` — 3D bar histograms at matching times
 - `hist/final_mlp_boundaries.pdf` — final histogram with MLP decision boundaries
 - `sphere/trajectory_{null,mlp}.pdf` — 3D trajectory plot (linear time scale, if `pdf_trajectory=true`)
 - `sphere/trajectory_{null,mlp}_log.pdf` — 3D trajectory plot (log time scale, if `pdf_trajectory=true`)
@@ -166,7 +176,8 @@ Each beta's `summary.json` includes:
 - `null_cluster_masses`, `mlp_cluster_masses` — all cluster masses at convergence
 - `heaviest_mass_null`, `heaviest_mass_mlp` — heaviest cluster mass
 - `null_cluster_times`, `mlp_cluster_times` — convergence times
-- `positions_initial`, `positions_middle_*`, `positions_final_*` — particle positions
+- `positions_initial`, `positions_final_*` — particle positions (S¹ + S²)
+- `positions_middle_*` — middle snapshots (S² only)
 - `histogram_edges`, `*_histogram_densities` — histogram bins/densities
 - `energy_times_*`, `energy_values_*` — energy time series
 - `mlp_a`, `mlp_omega`, `mlp_activation` — MLP parameters
@@ -184,8 +195,15 @@ At the experiment root:
 - `stats/mass_count_with_null.pdf` — mass-count vs √β (MLP + null, S¹)
 - `stats/heaviest_mass.pdf` — heaviest (and smallest non-spurious) cluster masses vs √β
 - `stats/all_masses.pdf` — all cluster masses vs √β
-- `stats/energy_overlay*.pdf` — energy overlays across betas (linear/log, with/without legend)
 - `mlp_scale_sweep.json` — when `mlp_scale` is a list
+- `mlp_scale_stop_time.pdf` — stop time vs MLP scale (written to one run folder per beta)
+
+If `dimension` is a list (S² multi-dim sweep), additional aggregate plots are saved:
+
+- `cluster_count_by_dimension.pdf` — cluster count vs √β (MLP + null)
+- `cluster_count_by_dimension_log.pdf` — log‑scale y axis
+- `cluster_count_by_dimension_mlp.pdf` — MLP‑only
+- `cluster_count_by_dimension_mlp_log.pdf` — MLP‑only, log‑scale
 
 ## Resuming Experiments
 
@@ -198,6 +216,12 @@ experiment folder:
 
 The system detects completed betas by matching `params.json` and skips them.
 Stats are generated from all available `summary.json` files at the end.
+
+## Convergence Notes
+
+For S¹ gradient descent with `MLP=0` and `total_time=inf`, the null run is capped
+to a short sanity window (1000 steps by default) and marked with `stop_reason`
+`sanity` or `sanity_failed`, rather than attempting full convergence.
 
 ## Memory Optimization
 
