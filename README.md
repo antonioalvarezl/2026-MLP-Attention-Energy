@@ -124,7 +124,7 @@ when `dimension>=3` or when `dimension` is a list (multi-dimension sweep).
 
 For our experiments we typically set:
 
-- `particle_seed = 42` (data/particles)
+- `particle_seed = 42`
 - `mlp_seed = 777` for S^1
 - `mlp_seed = 111` for S^2
 
