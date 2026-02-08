@@ -1,7 +1,7 @@
 # Transformer Dynamics as Wasserstein Gradient Flow
 
 This repo simulates transformer-style dynamics (self-attention + MLP) on compact
-manifolds, interpreted as Wasserstein gradient flows. Two geometries are supported:
+manifolds, interpreted as Wasserstein gradient flows.
 
 - **S¹ (circle)**: dimension = 2
 - **S² (sphere)**: dimension = 3 (animations in the folder wgf_sphere)
